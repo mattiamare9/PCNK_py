@@ -1,0 +1,14 @@
+[run]
+branch = True
+source = src/my_project
+
+[report]
+show_missing = True
+skip_empty = True
+omit =
+    */__init__.py
+    tests/*
+    examples/*
+
+[html]
+directory = htmlcov

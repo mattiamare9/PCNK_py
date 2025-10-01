@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "my_project"
+version = "0.1.0"
+description = "Python port of the PCNK Julia project (Physics-constrained neural kernels)"
+authors = ["Mattia Marella <mattia.marella@edu.unife.it>"]
+license = "MIT"
+readme = "README.md"
+packages = [{ include = "my_project", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.12,<3.13"
+numpy = "1.26.*"
+scipy = "1.14.*"
+torch = "2.8.0"
+h5py = "3.12.*"
+pyyaml = "6.0.*"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3"
+pytest-cov = "^5.0"
+black = "^24.4"
+ruff = "^0.6"
+mypy = "^1.10"
+ipython = "^8.27"
+
+[tool.poetry.scripts]
+uniform-demo = "examples.uniform_kernel_demo:main"
+torch-bessel-training = "examples.torch_bessel_training:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

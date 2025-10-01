@@ -1,0 +1,28 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.conda/
+*.egg-info/
+
+# Poetry / Pipenv
+poetry.lock
+Pipfile.lock
+
+# Build & dist
+build/
+dist/
+.eggs/
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db

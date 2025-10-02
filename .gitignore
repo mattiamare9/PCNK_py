@@ -12,7 +12,7 @@ env/
 *.egg-info/
 
 # Poetry / Pipenv
-poetry.lock
+# poetry.lock commented for reproducible builds
 Pipfile.lock
 
 # Build & dist

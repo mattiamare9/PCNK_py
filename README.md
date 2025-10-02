@@ -1,4 +1,5 @@
-# my_project
+
+# PhysicsConstrainedNeuralKernel-python
 
 Python conversion of the PCNK Julia project from https://github.com/skoyamalab/PhysicsConstrainedNeuralKernel.
 

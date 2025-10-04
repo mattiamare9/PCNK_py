@@ -1,175 +1,166 @@
-from __future__ import annotations
+"""
+Evaluation routines for Directional Spherical Bessel Kernels
+(Port of PCNK/Kernels/DirectionalISFK/Evaluation.jl)
+"""
 
 import torch
-from typing import Tuple
+import numpy as np
 
 from my_project.core.background.differences import diff_mat_mat
 
 
-def _ensure_leading3(x: torch.Tensor) -> torch.Tensor:
-    """
-    Normalize so the leading axis is 3:
-      (3,) -> (3,)
-      (B,3) -> (3,B)
-      (3,B) -> (3,B)
-      (B1,B2,3) -> (3,B1,B2)
-      (3,B1,B2) -> (3,B1,B2)
-    """
-    if x.ndim == 1:
-        if x.shape[0] != 3:
-            raise ValueError("1D input must have length 3.")
-        return x
-    if x.ndim == 2:
-        if x.shape[0] == 3:
-            return x
-        if x.shape[1] == 3:
-            return x.mT
-        raise ValueError("2D input must have a dimension of size 3.")
-    if x.ndim == 3:
-        if x.shape[0] == 3:
-            return x
-        if x.shape[2] == 3:
-            return x.permute(2, 0, 1)
-        raise ValueError("3D input must have a dimension of size 3.")
-    raise ValueError("x must be 1D, 2D, or 3D.")
-
-
-def _get_j(dtype: torch.dtype, device: torch.device) -> torch.Tensor:
-    """Return a correctly typed imaginary unit (1j) matching float precision."""
-    ctype = torch.complex64 if dtype == torch.float32 else torch.complex128
-    return torch.tensor(1j, dtype=ctype, device=device)
-
-
-def _j0(z: torch.Tensor) -> torch.Tensor:
-    """
-    Spherical Bessel j0(z) = sin(z) / z, works for real/complex tensors.
-    Uses safe division at z=0 -> 1.
-    """
-    # NOTE: z can be complex
+def spherical_j0(z: torch.Tensor) -> torch.Tensor:
+    """Spherical Bessel j0 = sin(z)/z, safe at 0."""
     out = torch.empty_like(z, dtype=z.dtype)
-    zero = torch.zeros((), dtype=z.real.dtype, device=z.device)
-    mask_zero = (z == 0)
-    out[mask_zero] = (torch.ones((), dtype=z.dtype, device=z.device))
-    out[~mask_zero] = torch.sin(z[~mask_zero]) / z[~mask_zero]
+    mask = z == 0
+    out[mask] = 1.0
+    out[~mask] = torch.sin(z[~mask]) / z[~mask]
     return out
 
 
-def _i0_real(x: torch.Tensor) -> torch.Tensor:
-    """
-    Modified Bessel I0 for real tensors using torch.i0 (real-only).
-    """
-    # torch.i0 expects real dtype
-    return torch.i0(x)
+# def _ensure_leading3(x: torch.Tensor) -> torch.Tensor:
+#     """Ensure x has leading dimension 3."""
+#     if x.ndim == 1:
+#         return x.view(3)
+#     elif x.ndim == 2 and x.shape[0] != 3:
+#         return x.T
+#     return x
 
 
-def _eval_single_dir(
-    k: torch.Tensor, x: torch.Tensor, v: torch.Tensor, sigma: torch.Tensor, beta: torch.Tensor
-) -> torch.Tensor:
-    """
-    Single-direction case (N=1), Julia:
+# ---- Single-direction evaluation -------------------------------------------------
 
-      β = view(a.β, 1)
-      return view(a.σ,1) .* j0.(sqrt(sum((Complex(k*x) - i*(β .* v)).^2))) / i0(β)
-
-    x: (3,), (3,B), or (3,B1,B2)  | v: (3,1) | sigma: (1,) | beta: (1,)
-    Returns scalar / (B,) / (B1,B2)
-    """
-    x = _ensure_leading3(x)
-
-    # cast everything to x's dtype/device
+def _eval_single_dir(k: torch.Tensor,
+                     x: torch.Tensor,   # (3,), (3,B) or (3,B1,B2)
+                     v: torch.Tensor,   # (3,1)
+                     sigma: torch.Tensor,
+                     beta: torch.Tensor) -> torch.Tensor:
     k = torch.as_tensor(k, dtype=x.dtype, device=x.device)
     v = v.to(dtype=x.dtype, device=x.device)
-    sigma = sigma.to(dtype=x.dtype, device=x.device)       # (1,)
-    beta = beta.to(dtype=x.dtype, device=x.device)         # (1,)
+    sigma = sigma.to(dtype=x.dtype, device=x.device)
+    beta = beta.to(dtype=x.dtype, device=x.device)
 
-    j = _get_j(x.dtype, x.device)
+    # complex unit with correct dtype/device
+    j = torch.tensor(1j, dtype=torch.complex64 if x.dtype == torch.float32 else torch.complex128,
+                     device=x.device)
 
-    # build c = k*x - i*(beta*v), broadcasting across batch dims of x
-    # v: (3,1), beta: (1,) -> beta*v: (3,1)
-    c = k * x - j * (beta * v)              # (3, ...)
+    # single-direction vectors as 1D tensors
+    v_vec = v[:, 0] if v.ndim == 2 and v.shape[1] == 1 else v
+    beta_s = beta.reshape(()) if beta.numel() == 1 else beta   # scalar tensor if N==1
+    sigma_s = sigma.reshape(()) if sigma.numel() == 1 else sigma
 
-    # sum of squares without conjugate (as in Julia), along axis 0
-    s = torch.sum(c * c, dim=0)             # (...,)
+    if x.ndim == 1:  # (3,)
+        u = k * x - j * (beta_s * v_vec)            # (3,)
+        s = (u * u).sum()                           # scalar
+        z = torch.sqrt(s)
+        return sigma * spherical_j0(z) / torch.i0(beta)
 
-    z = torch.sqrt(s)                       # (...,)
-    num = sigma.view(1) * _j0(z)            # (...,)
-    den = _i0_real(beta.view(1))            # scalar (1,)
-    return num / den                        # (...,)
+    elif x.ndim == 2:  # (3,B)  -> return (B,)
+        X = x                                            # (3,B)
+        u = k * X - (j * beta_s) * v_vec[:, None]        # (3,B)
+        s = (u * u).sum(dim=0)                           # (B,)
+        z = torch.sqrt(s)                                # (B,)
+        return (sigma_s / torch.i0(beta_s)) * spherical_j0(z)  # (B,)
 
+    elif x.ndim == 3:  # (3,B1,B2) -> flatten, eval, reshape back
+        B1, B2 = x.shape[1], x.shape[2]
+        x_flat = x.reshape(3, -1)                        # (3, B1*B2)
+        out = _eval_single_dir(k, x_flat, v, sigma, beta)  # (B1*B2,)
+        return out.reshape(B1, B2)
 
-def _eval_multi_dir(
-    k: torch.Tensor, x: torch.Tensor, v: torch.Tensor, sigma: torch.Tensor, beta: torch.Tensor
-) -> torch.Tensor:
-    """
-    Multi-direction case (N=D), Julia patterns:
+    else:
+        raise ValueError("x must be 1D, 2D or 3D for single-direction kernel.")
 
-      For x vector (3,) -> sum over D of ((σ/i0(β)) * j0(sqrt(sum((k*x - i*(v*β))^2))))
-      For x matrix (3,B) -> return (B,)
-      For x tensor  (3,B1,B2) -> return (B1,B2)
-
-    x: (3,), (3,B), (3,B1,B2)    v: (3,D)    sigma: (D,)    beta: (D,)
-    """
-    x = _ensure_leading3(x)
-
-    # common dtypes/devices anchored on x
+# ---- Multi-direction evaluation -------------------------------------------------
+def _eval_multi_dir(k: torch.Tensor,
+                    x: torch.Tensor,   # (3,), (3,B) or (3,B1,B2)
+                    v: torch.Tensor,   # (3,D)
+                    sigma: torch.Tensor,
+                    beta: torch.Tensor) -> torch.Tensor:
     k = torch.as_tensor(k, dtype=x.dtype, device=x.device)
-    v = v.to(dtype=x.dtype, device=x.device)               # (3,D)
-    sigma = sigma.to(dtype=x.dtype, device=x.device)       # (D,)
-    beta = beta.to(dtype=x.dtype, device=x.device)         # (D,)
+    v = v.to(dtype=x.dtype, device=x.device)
+    sigma = sigma.to(dtype=x.dtype, device=x.device)
+    beta = beta.to(dtype=x.dtype, device=x.device)
 
-    j = _get_j(x.dtype, x.device)
+    j = torch.tensor(1j, dtype=torch.complex64 if x.dtype == torch.float32 else torch.complex128, device=x.device)
 
-    # weights w = sigma / i0(beta)
-    w = sigma / _i0_real(beta)                             # (D,)
+    if x.ndim == 1:  # (3,)
+        c = k * x[:, None] - j * (v * beta[None, :])   # (3,D)
+        s = (c * c).sum(dim=0)  # (D,)
+        z = torch.sqrt(s)
+        return torch.sum((sigma / torch.i0(beta)) * spherical_j0(z))
 
-    if x.ndim == 1:
-        # (3,), build (3,D) and sum over dim=0 -> (D,)
-        c = (k * x).unsqueeze(1) - j * (v * beta.unsqueeze(0))     # (3,D)
-        s = torch.sum(c * c, dim=0)                                # (D,)
-        z = torch.sqrt(s)                                          # (D,)
-        return (w * _j0(z)).sum()                                  # scalar
-
-    if x.ndim == 2:
-        # (3,B) -> expand to (3,D,B)
+    elif x.ndim == 2:  # (3,B)
         B = x.shape[1]
-        c = (k * x).unsqueeze(1) - j * (v * beta.unsqueeze(0)).unsqueeze(2)   # (3,D,B)
-        s = torch.sum(c * c, dim=0)                                           # (D,B)
-        z = torch.sqrt(s)                                                     # (D,B)
-        return (w[:, None] * _j0(z)).sum(dim=0)                               # (B,)
+        c = k * x[:, None, :] - j * (v[:, :, None] * beta[None, :, None])  # (3,D,B)
+        s = (c * c).sum(dim=0)  # (D,B)
+        z = torch.sqrt(s)
+        return ((sigma / torch.i0(beta))[:, None] * spherical_j0(z)).sum(dim=0)  # (B,)
 
-    # x.ndim == 3: (3,B1,B2)
-    B1, B2 = x.shape[1], x.shape[2]
-    c = (k * x).unsqueeze(1) - j * (v * beta.unsqueeze(0)).unsqueeze(2).unsqueeze(3)  # (3,D,B1,B2)
-    s = torch.sum(c * c, dim=0)                                                       # (D,B1,B2)
-    z = torch.sqrt(s)                                                                  # (D,B1,B2)
-    return (w.view(-1, 1, 1) * _j0(z)).sum(dim=0)                                      # (B1,B2)
+    elif x.ndim == 3:  # (3,B1,B2)
+        B1, B2 = x.shape[1], x.shape[2]
+        x_flat = x.reshape(3, -1)  # (3, B1*B2)
+        out = _eval_multi_dir(k, x_flat, v, sigma, beta)  # (B1*B2,)
+        return out.reshape(B1, B2)
+
+    else:
+        raise ValueError("x must be 1D, 2D or 3D for multi-direction kernel.")
+
+# ---- Public evaluators ----------------------------------------------------------
+
+def eval_directional_single(a, x: torch.Tensor) -> torch.Tensor:
+    """DirectionalSFKernel for one input."""
+    x = _ensure_leading3(x)
+    if a.v.shape[1] == 1:   # single direction
+        return _eval_single_dir(a.k, x, a.v, a.sigma, a.beta)
+    else:                   # multiple directions
+        return _eval_multi_dir(a.k, x, a.v, a.sigma, a.beta)
 
 
-def eval_directional_single(
-    k: torch.Tensor, x: torch.Tensor, v: torch.Tensor, sigma: torch.Tensor, beta: torch.Tensor
-) -> torch.Tensor:
+def _ensure_leading3(x: torch.Tensor) -> torch.Tensor:
+    """Ensure x has leading dimension 3: (3,), (3,B)."""
+    if x.ndim == 1:
+        if x.numel() != 3:
+            raise ValueError("1D x must have length 3.")
+        return x.view(3)
+    elif x.ndim == 2:
+        # Accept (3,B) or (B,3) and convert to (3,B)
+        if x.shape[0] == 3:
+            return x
+        if x.shape[1] == 3:
+            return x.T
+        raise ValueError("2D x must be (3,B) or (B,3).")
+    elif x.ndim == 3:
+        # Assume already (3,B1,B2) if leading dim is 3; otherwise swap first/last if (B1,B2,3)
+        if x.shape[0] == 3:
+            return x
+        if x.shape[-1] == 3:
+            return x.movedim(-1, 0)  # (3,B1,B2)
+        raise ValueError("3D x must be (3,B1,B2) or (B1,B2,3).")
+    else:
+        raise ValueError("x must be 1D, 2D, or 3D.")
+
+
+def eval_directional_pair(a, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
     """
-    Dispatch between single-direction (N=1) and multi-direction (N>1) pathways.
+    DirectionalSFKernel for two inputs, using Δx = x1 - x2.
+    Accepts x1, x2 as (3,B), (B,3), or (3,) / (B,3) mixed and returns (B1,B2).
     """
-    # v: (3,N)
-    N = v.shape[1]
-    if N == 1:
-        return _eval_single_dir(k, x, v[:, :1], sigma.view(1), beta.view(1))
-    return _eval_multi_dir(k, x, v, sigma, beta)
+    # Bring both to leading-3 2D: (3,B1) and (3,B2)
+    X1 = _ensure_leading3(x1)
+    X2 = _ensure_leading3(x2)
 
+    if X1.ndim == 1:  # (3,) -> (3,1)
+        X1 = X1.unsqueeze(1)
+    if X2.ndim == 1:
+        X2 = X2.unsqueeze(1)
 
-def eval_directional_pair(
-    k: torch.Tensor,
-    x1: torch.Tensor,
-    x2: torch.Tensor,
-    v: torch.Tensor,
-    sigma: torch.Tensor,
-    beta: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Two-input evaluation: compute Δx = __Diff(x1, x2) then call single-input path.
-    __Diff returns either (3,B1,B2) or (B1,B2,3); eval_directional_single handles both.
-    """
-    delta_np = diff_mat_mat(x1.cpu().numpy(), x2.cpu().numpy())
-    delta = torch.tensor(delta_np, dtype=x1.dtype, device=x1.device)
-    return eval_directional_single(k, delta, v, sigma, beta)
+    if X1.ndim != 2 or X2.ndim != 2 or X1.shape[0] != 3 or X2.shape[0] != 3:
+        raise ValueError("x1 and x2 must be vectors or 2D with leading dimension 3.")
+
+    # Compute Δx in torch to preserve dtype/device & shape
+    # X1: (3,B1), X2: (3,B2) -> delta: (3,B1,B2)
+    delta = X1[:, :, None] - X2[:, None, :]
+
+    # Evaluate with 3D support; result is (B1,B2)
+    return eval_directional_single(a, delta)
+

@@ -30,5 +30,5 @@ __all__ = [
     "uniform_kernel",
     "evaluate_uniform_kernel_numpy",
     "evaluate_uniform_kernel_torch",
-    "promote_dtype",
+    #"promote_dtype",
 ]

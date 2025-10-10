@@ -60,6 +60,7 @@ class UniformISFKernelBase(nn.Module):
     device : torch.device or str, optional
         Device placement.
     """
+    k: torch.Tensor
 
     def __init__(
         self,

@@ -34,7 +34,10 @@ def _eval_single_dir(k: torch.Tensor,
                      v: torch.Tensor,   # (3,1)
                      sigma: torch.Tensor,
                      beta: torch.Tensor) -> torch.Tensor:
-    k = torch.as_tensor(k, dtype=x.dtype, device=x.device)
+
+    dtype = torch.result_type(k, x)
+    k = torch.as_tensor(k, dtype=dtype, device=x.device)
+
     v = v.to(dtype=x.dtype, device=x.device)
     sigma = sigma.to(dtype=x.dtype, device=x.device)
     beta = beta.to(dtype=x.dtype, device=x.device)
@@ -76,7 +79,10 @@ def _eval_multi_dir(k: torch.Tensor,
                     v: torch.Tensor,   # (3,D)
                     sigma: torch.Tensor,
                     beta: torch.Tensor) -> torch.Tensor:
-    k = torch.as_tensor(k, dtype=x.dtype, device=x.device)
+
+    dtype = torch.result_type(k, x)
+    k = torch.as_tensor(k, dtype=dtype, device=x.device)
+
     v = v.to(dtype=x.dtype, device=x.device)
     sigma = sigma.to(dtype=x.dtype, device=x.device)
     beta = beta.to(dtype=x.dtype, device=x.device)

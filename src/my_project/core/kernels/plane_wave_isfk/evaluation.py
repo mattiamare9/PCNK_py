@@ -42,7 +42,8 @@ def _get_j(dtype: torch.dtype, device: torch.device) -> torch.Tensor:
 
 def _eval_single_vector(k: torch.Tensor, x: torch.Tensor,
                         v: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
-    k = torch.as_tensor(k, dtype=x.dtype, device=x.device)
+    dtype = torch.result_type(k, x)
+    k = torch.as_tensor(k, dtype=dtype, device=x.device)
     v = v.to(dtype=x.dtype, device=x.device)
     sigma = sigma.to(dtype=x.dtype, device=x.device)
     kx = k * (v.T @ x)  # (D,)
@@ -52,7 +53,8 @@ def _eval_single_vector(k: torch.Tensor, x: torch.Tensor,
 
 def _eval_matrix(k: torch.Tensor, X: torch.Tensor,
                  v: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
-    k = torch.as_tensor(k, dtype=X.dtype, device=X.device)
+    dtype = torch.result_type(k, X)
+    k = torch.as_tensor(k, dtype=dtype, device=X.device)
     v = v.to(dtype=X.dtype, device=X.device)
     sigma = sigma.to(dtype=X.dtype, device=X.device)
     kx = k * (v.T @ X)  # (D, B)
@@ -62,7 +64,8 @@ def _eval_matrix(k: torch.Tensor, X: torch.Tensor,
 
 def _eval_tensor3(k: torch.Tensor, X: torch.Tensor,
                   v: torch.Tensor, sigma: torch.Tensor) -> torch.Tensor:
-    k = torch.as_tensor(k, dtype=X.dtype, device=X.device)
+    dtype = torch.result_type(k, X)
+    k = torch.as_tensor(k, dtype=dtype, device=X.device)
     v = v.to(dtype=X.dtype, device=X.device)
     sigma = sigma.to(dtype=X.dtype, device=X.device)
     B1, B2 = X.shape[1], X.shape[2]

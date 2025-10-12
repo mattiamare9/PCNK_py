@@ -79,7 +79,7 @@ class FixedDirectionSFKernel(DirectionalSFKernelBase):
         k_device: torch.device = cast(torch.device, self.k.device)
 
         # directions
-        v_t = torch.as_tensor(v, dtype=k_dtype, device=k_device)
+        v_t = torch.as_tensor(v, dtype=k_dtype, device=k_device).real
         if v_t.ndim == 1:
             v_t = v_t.view(3, 1)
         assert v_t.shape[0] == 3, "v must have shape (3, N) or be length-3."
@@ -100,7 +100,7 @@ class FixedDirectionSFKernel(DirectionalSFKernelBase):
         self.sigma = nn.Parameter(sigma_t, requires_grad=True)
 
         # beta
-        beta_t = torch.full((N,), float(beta_init), dtype=k_dtype, device=k_device)
+        beta_t = torch.full((N,), float(beta_init), dtype=k_dtype, device=k_device).real
         self.beta = nn.Parameter(beta_t, requires_grad=True)
 
     def forward(self, x1: torch.Tensor, x2: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -135,7 +135,7 @@ class TrainableDirectionSFKernel(DirectionalSFKernelBase):
         k_dtype: torch.dtype = cast(torch.dtype, self.k.dtype)
         k_device: torch.device = cast(torch.device, self.k.device)
 
-        v_t = torch.as_tensor(v, dtype=k_dtype, device=k_device)
+        v_t = torch.as_tensor(v, dtype=k_dtype, device=k_device).real
         if v_t.ndim == 1:
             v_t = v_t.view(3, 1)
         assert v_t.shape[0] == 3, "v must have shape (3, N) or be length-3."
@@ -154,7 +154,7 @@ class TrainableDirectionSFKernel(DirectionalSFKernelBase):
                 raise ValueError("Length of sigma must match number of directions.")
         self.sigma = nn.Parameter(sigma_t, requires_grad=True)
 
-        beta_t = torch.full((N,), float(beta_init), dtype=k_dtype, device=k_device)
+        beta_t = torch.full((N,), float(beta_init), dtype=k_dtype, device=k_device).real
         self.beta = nn.Parameter(beta_t, requires_grad=True)
 
     def forward(self, x1: torch.Tensor, x2: Optional[torch.Tensor] = None) -> torch.Tensor:

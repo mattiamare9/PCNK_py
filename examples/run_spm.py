@@ -33,8 +33,8 @@ results = run_spm(
     output_dir=create_run_directory(OUTPUT_DIR),
     kernel_factories={
         "uni": uniform_factory,
-        #"prop": prop_factory,
-        #"pcnk": pcnk_factory,
+        "prop": prop_factory,
+        "pcnk": pcnk_factory,
     },
     # backend="torch",                 # forza percorso torch
     torch_dtype=torch.complex128,    # pipeline complessa

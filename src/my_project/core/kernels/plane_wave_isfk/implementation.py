@@ -139,7 +139,7 @@ class FixedDirectionPlaneWaveKernel(PlaneWaveKernelBase):
     ):
         super().__init__(k, dtype=dtype, device=device)
         # store directions as a fixed buffer (normalized)
-        v_t = torch.as_tensor(v, dtype=self.dtype, device=self.device)
+        v_t = torch.as_tensor(v, dtype=self.dtype, device=self.device).real
         assert v_t.ndim == 2 and v_t.shape[0] == 3, "v must be (3, N)"
         v_t = _normalize_columns(v_t)
         self.register_buffer("v", v_t, persistent=True)
@@ -194,7 +194,7 @@ class TrainableDirectionPlaneWaveKernel(PlaneWaveKernelBase):
     ):
         super().__init__(k, dtype=dtype, device=device)
 
-        v_t = torch.as_tensor(v, dtype=self.dtype, device=self.device)
+        v_t = torch.as_tensor(v, dtype=self.dtype, device=self.device).real
         assert v_t.ndim == 2 and v_t.shape[0] == 3, "v must be (3, N)"
         v_t = _normalize_columns(v_t)
         self.v = nn.Parameter(v_t, requires_grad=True)
@@ -260,7 +260,7 @@ class NeuralWeightPlaneWaveKernel(PlaneWaveKernelBase):
     ):
         super().__init__(k, dtype=dtype, device=device)
 
-        v_t = torch.as_tensor(v, dtype=self.dtype, device=self.device)
+        v_t = torch.as_tensor(v, dtype=self.dtype, device=self.device).real
         assert v_t.ndim == 2 and v_t.shape[0] == 3, "v must be (3, N)"
         v_t = _normalize_columns(v_t)
         self.register_buffer("v", v_t, persistent=True)

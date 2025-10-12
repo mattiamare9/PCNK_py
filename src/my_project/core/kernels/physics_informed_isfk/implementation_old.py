@@ -1,7 +1,5 @@
-# src/my_project/core/kernels/physics_informed_isfk/implementation.py
-
 from __future__ import annotations
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 import torch
 import torch.nn as nn
@@ -18,46 +16,49 @@ _DeviceLike = Union[torch.device, str, None]
 # Utilities
 # --------------------------------------------------------------------------
 
-def _squeeze_2d_to_1d(x: torch.Tensor) -> torch.Tensor:
-    """If a kernel returns (1,B) or (B,1), squeeze to (B,)."""
-    if x.ndim == 2 and 1 in x.shape:
-        return x.reshape(-1)
-    return x
+def _to_row_major(x: torch.Tensor) -> torch.Tensor:
+    """
+    Convert to row-major (B, 3):
+      (3,)     -> (1, 3)
+      (3, B)   -> (B, 3)
+      (B, 3)   -> unchanged
+    """
+    if x.ndim == 1:
+        assert x.numel() == 3, "Expected a length-3 vector."
+        return x.view(1, 3)
+    if x.shape[-1] == 3:
+        return x  # already (B,3)
+    # assume column-major (3,B)
+    assert x.shape[0] == 3, "Expected shape (3, B) or (B, 3)."
+    return x.mT  # -> (B,3)
+
+
+def _to_col_major(x: torch.Tensor) -> torch.Tensor:
+    """
+    Convert to column-major (3, B):
+      (3,)     -> (3, 1)
+      (B, 3)   -> (3, B)
+      (3, B)   -> unchanged
+    """
+    if x.ndim == 1:
+        assert x.numel() == 3, "Expected a length-3 vector."
+        return x.view(3, 1)
+    if x.shape[0] == 3:
+        return x  # already (3,B)
+    # assume row-major (B,3)
+    assert x.shape[-1] == 3, "Expected shape (B, 3) or (3, B)."
+    return x.mT  # -> (3,B)
 
 
 def _combine_outputs(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
-    Sum analytical + neural parts, promoting dtype (e.g., float+complex → complex),
-    aligning device, and normalizing accidental singleton shapes:
-      - scalar stays scalar
-      - (B,) stays (B,)
-      - (B1,B2) stays (B1,B2)
+    Add analytical + neural outputs. For a single input, both should be scalars;
+    for batches, both should be (B,). This function just returns a + b and,
+    in the rare case a 1-D single-input tensor sneaks through, reduces it.
     """
-    a = _squeeze_2d_to_1d(a)
-    b = _squeeze_2d_to_1d(b)
-
-    # Promote dtype
-    target_dtype = torch.result_type(a, b)
-    if a.dtype != target_dtype:
-        a = a.to(target_dtype)
-    if b.dtype != target_dtype:
-        b = b.to(target_dtype)
-
-    # Align device
-    if a.device != b.device:
-        b = b.to(a.device)
-
-    # Final shape check (we should be adding same-shaped tensors)
-    if a.shape != b.shape:
-        raise RuntimeError(
-            f"Composite parts shape mismatch: analytical {tuple(a.shape)} vs neural {tuple(b.shape)}"
-        )
-
     out = a + b
-
-    # Normalize stray (1,) to scalar
     if out.ndim == 1 and out.numel() == 1:
-        out = out.squeeze(0)
+        return out.squeeze(0)
     return out
 
 
@@ -66,6 +67,7 @@ def _combine_outputs(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # --------------------------------------------------------------------------
 class CompositeKernelBase(nn.Module):
     """Base for physics-informed composite kernels combining analytical + neural parts."""
+
     analytical: nn.Module
     neural: nn.Module
 
@@ -74,19 +76,38 @@ class CompositeKernelBase(nn.Module):
 
     def _eval(self, x1: torch.Tensor, x2: Optional[torch.Tensor]) -> torch.Tensor:
         """
-        Pass inputs straight through; sub-kernels already handle shape/diff logic.
-        DO NOT compute x1 - x2 here (pairwise shapes (B1,B2) would break).
+        Shared evaluation that feeds:
+        - row-major inputs into the analytical kernel
+        - col-major inputs into the neural kernel
+        Ensures both produce matching output shapes.
         """
         if x2 is None:
-            a = self.analytical(x1)
-            n = self.neural(x1)
-        else:
-            a = self.analytical(x1, x2)
-            n = self.neural(x1, x2)
-        return _combine_outputs(a, n)
+            # Single-input mode
+            x1_row = _to_row_major(x1)
+            x1_col = _to_col_major(x1)
+            a = self.analytical(x1_row)
+            n = self.neural(x1_col)
+            out = a + n
+            if out.ndim == 1 and out.numel() == 1:
+                return out.squeeze(0)
+            return out
 
-    def forward(self, x1: torch.Tensor, x2: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return self._eval(x1, x2)
+        # --- Two-input mode (pairwise) ---
+        # Compute relative displacement δ = x1 - x2
+        # Both analytical and neural kernels expect a single (3,B) or (B,3) input
+        delta = x1 - x2
+
+        # Row-major for analytical; column-major for neural
+        delta_row = _to_row_major(delta)
+        delta_col = _to_col_major(delta)
+
+        a = self.analytical(delta_row)
+        n = self.neural(delta_col)
+
+        out = a + n
+        if out.ndim == 1 and out.numel() == 1:
+            return out.squeeze(0)
+        return out
 
 
 
@@ -94,6 +115,11 @@ class CompositeKernelBase(nn.Module):
 # PlaneWavePINKernel  (Uniform + Neural residual)
 # --------------------------------------------------------------------------
 class PlaneWavePINKernel(CompositeKernelBase):
+    """
+    Physics-informed kernel: analytical (uniform ISF) + neural plane-wave residual.
+    Mirrors Julia’s PlaneWavePINKernel.
+    """
+
     def __init__(
         self,
         k: float,
@@ -106,6 +132,9 @@ class PlaneWavePINKernel(CompositeKernelBase):
         super().__init__()
         self.analytical = ScaledUniformISFKernel(k, sigma=1.0, dtype=dtype, device=device)
         self.neural = plane_wave_kernel(k, ord=ord, W=W, dtype=dtype, device=device)
+
+    def forward(self, x1: torch.Tensor, x2: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return self._eval(x1, x2)
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"PlaneWavePINKernel(analytical={self.analytical!r}, neural={self.neural!r})"
@@ -123,6 +152,9 @@ def plane_wave_pin_kernel(
     return PlaneWavePINKernel(k, ord=ord, W=W, dtype=dtype, device=device)
 
 
+# --------------------------------------------------------------------------
+# DirectedResidualPINKernel (Directional + Neural residual)
+# --------------------------------------------------------------------------
 class DirectedResidualPINKernel(CompositeKernelBase):
     """
     Physics-informed kernel: directional spherical-Bessel analytical term
@@ -149,6 +181,9 @@ class DirectedResidualPINKernel(CompositeKernelBase):
             device=device,
         )
         self.neural = plane_wave_kernel(k, ord=ord_res, W=W, dtype=dtype, device=device)
+
+    def forward(self, x1: torch.Tensor, x2: Optional[torch.Tensor] = None) -> torch.Tensor:
+        return self._eval(x1, x2)
 
     def __repr__(self) -> str:  # pragma: no cover
         return (

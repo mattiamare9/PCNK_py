@@ -111,8 +111,18 @@ def eval_discrete_kernel_pair(a, x1: torch.Tensor, x2: torch.Tensor) -> torch.Te
 
 
 def eval_neural_kernel_pair(a, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
-    net_dtype = next(a.W.parameters()).dtype
-    kv = (a.k.to(dtype=net_dtype, device=a.v.device) * a.v.to(dtype=net_dtype))
+    # net_dtype = next(a.W.parameters()).dtype
+    # kv = (a.k.to(dtype=net_dtype, device=a.v.device) * a.v.to(dtype=net_dtype))
+    #---
+    net_dtype = torch.float64 if a.v.dtype == torch.float64 else torch.float32
+
+    # assicura che k e v siano REALI, sullo stesso device/dtype
+    k_real = torch.as_tensor(a.k, device=a.v.device).real.to(net_dtype)
+    v_real = a.v.to(dtype=net_dtype, device=a.v.device)
+
+    kv = k_real * v_real
+    # ---
+    
     Wout = a.W(kv.T).squeeze(-1)
     sigma_eff = a.sigma.to(dtype=net_dtype, device=a.v.device) * Wout
 

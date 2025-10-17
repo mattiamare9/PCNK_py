@@ -30,6 +30,8 @@ from typing import Callable, Dict, Optional, Tuple, List, cast
 
 import numpy as np
 import h5py
+import matplotlib
+matplotlib.use("Agg")  # oppure in env: MPLBACKEND=Agg
 import matplotlib.pyplot as plt
 
 import torch
@@ -245,6 +247,13 @@ def _apply_sigma_constraints_hard(kernel: nn.Module) -> None:
             p.data.copy_(torch.clamp(p_real, min=0.0).to(p.data.dtype))
 
 
+        for name, p in kernel.named_parameters():
+            if "beta" in name.lower() or "β" in name:
+                # Usa .data perché siamo in no_grad()
+                # Un beta troppo grande causa overflow in exp(beta * cos(theta))
+                p.data.copy_(torch.clamp(p.data, min=1e-3, max=600.0))
+
+
 def _sigma_soft_penalty(kernel: nn.Module, weight: float = 10.0) -> torch.Tensor:
     """
     Soft penalty if not using hard constraints:
@@ -267,32 +276,59 @@ def _sigma_soft_penalty(kernel: nn.Module, weight: float = 10.0) -> torch.Tensor
 # LOO losses (Julia-style)
 # =========================
 
+def _safe_Kinv_and_diag(A: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Robust inverse & diag for complex A:
+    - symmetrize Hermitian part
+    - add tiny jitter (relative to ||A||)
+    - try Cholesky -> cholesky_inverse (HPD)
+    - else pinv (Moore–Penrose)
+    - clamp diagonal magnitude away from 0 for stable LOO division
+    """
+    # Hermitian symmetrization + jitter
+    Ah = 0.5 * (A + A.conj().T)
+    jitter = (A.norm() / A.shape[0]).real.clamp(min=1e-12) * 1e-6
+    Ah = Ah + jitter * torch.eye(A.shape[0], dtype=A.dtype, device=A.device)
+
+    # Inversion
+    try:
+        L = torch.linalg.cholesky(Ah)
+        Kinv = torch.cholesky_inverse(L)
+    except RuntimeError:
+        Kinv = torch.linalg.pinv(Ah)
+
+    diag = torch.diagonal(Kinv)
+
+    # Clamp denom magnitude to avoid div-by-(~0 + i~0)
+    eps = diag.abs().real.mean() * 1e-8 if torch.isfinite(diag).all() else torch.tensor(1e-8, device=A.device)
+    eps = eps.clamp(min=1e-12)
+    small = diag.abs() < eps
+    if small.any():
+        # add eps in the current complex direction (preserva fase, evita cuspidi)
+        diag = torch.where(small, diag + eps * (diag / (diag.abs() + 1e-24)), diag)
+
+    return Kinv, diag
+
+
+def _loo_core(K: torch.Tensor, y: torch.Tensor, reg: torch.Tensor, lam: float) -> torch.Tensor:
+    A = K + lam * reg * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
+    Kinv, d = _safe_Kinv_and_diag(A)
+    alpha = Kinv @ y
+    return torch.sum(torch.abs(alpha / d) ** 2)
+
+
 def _loo_loss_pcnk(kernel: nn.Module, X: torch.Tensor, y: torch.Tensor, lam: float) -> torch.Tensor:
-    """
-    PCNK (neural plane-wave): LOO loss = sum(|alpha / diag(Kinv)|^2)
-    with reg = reg_n.
-    """
     K = kernel(X, X)
     _, reg_n = _reg_terms(kernel)
-    A = K + lam * reg_n * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
-    Kinv = torch.linalg.inv(A)
-    alpha = Kinv @ y
-    diag = torch.diagonal(Kinv)
-    return torch.sum(torch.abs(alpha / diag) ** 2)
+    reg = reg_n if torch.isfinite(reg_n) else torch.zeros((), dtype=K.dtype, device=K.device)
+    return _loo_core(K, y, reg, lam)
 
 
 def _loo_loss_prop(kernel: nn.Module, X: torch.Tensor, y: torch.Tensor, lam: float) -> torch.Tensor:
-    """
-    Proposed (analytical + neural): reg = reg_a + reg_n, and add +0.5 * reg_n to the loss.
-    """
     K = kernel(X, X)
     reg_a, reg_n = _reg_terms(kernel)
-    reg = reg_a + reg_n
-    A = K + lam * reg * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
-    Kinv = torch.linalg.inv(A)
-    alpha = Kinv @ y
-    diag = torch.diagonal(Kinv)
-    return torch.sum(torch.abs(alpha / diag) ** 2) + 0.5 * reg_n
+    reg = (reg_a + reg_n) if (torch.isfinite(reg_a) and torch.isfinite(reg_n)) else torch.zeros((), dtype=K.dtype, device=K.device)
+    return _loo_core(K, y, reg, lam) + 0.5 * reg_n
 
 
 def _choose_loo_loss(kernel: nn.Module) -> Callable[[nn.Module, torch.Tensor, torch.Tensor, float], torch.Tensor]:
@@ -383,10 +419,18 @@ def train_kernel_lbfgs(
 
     def closure():
         optimizer.zero_grad()
+
+        # NEW: applica vincoli hard prima del forward per evitare NaN in K
+        _apply_sigma_constraints_hard(kernel)
+
         loss = loo(kernel, X, y, lam)
 
         if not hard_sigma:
             loss = loss + _sigma_soft_penalty(kernel, weight=sigma_soft_weight)
+
+        # failsafe: se loss non finita, restituisco loss grande
+        if not torch.isfinite(loss):
+            return (torch.ones((), dtype=loss.dtype, device=loss.device) * 1e6)
 
         loss.backward()
         return loss
@@ -481,6 +525,28 @@ def run_spm(
                 A = K + (lam * reg) * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
 
             alpha = _torch_solve(A, y_f)
+            # ---
+            if freq > 400.0:
+                # Controlla la matrice K
+                print(f"[{freq} Hz] K mean: {K.abs().mean().item():.2e}")
+                
+                # Add this debug code to your SPM run before the condition number calculation
+                if torch.isnan(K).any() or torch.isinf(K).any():
+                    print(f"!!! KERNEL PROBLEM at {freq} Hz:")
+                    print(f"  K contains NaN: {torch.isnan(K).any()}")
+                    print(f"  K contains Inf: {torch.isinf(K).any()}")
+                    print(f"  k value: {k}")
+                    # Skip this frequency or use fallback
+                    #continue
+                
+                # Controlla il condizionamento (CN) di A. Un CN > 1e12 è problematico.
+                CN = np.linalg.cond(A.detach().cpu().numpy())
+                print(f"[{freq} Hz] A Condition Number: {CN:.2e}")
+
+                # Se CN è troppo grande, c'è l'instabilità.
+                if CN > 1e10:
+                    print("!!! WARNING: KRR Matrix A is ill-conditioned, likely leading to NaN/Inf")
+            #---
 
             Kv = kernel(Xv, X)
             yv_hat = Kv @ alpha

@@ -38,10 +38,12 @@ def make_default_W(device: str = "cpu", dtype=torch.float64) -> nn.Module:
 
 
 def main():
+        # Nota: può rallentare il training, usalo solo per il debug.
+    torch.autograd.set_detect_anomaly(True) 
     # === Parametri esperimento (coerenti con Julia) ===
     h5_path = DATA_DIR / "400SPM_converted.h5"
     SNR_DB = 20.0
-    LAMBDA = 0.011         # λ di Julia (varianza del rumore ~20 dB)
+    LAMBDA = .0051         # λ di Julia (varianza del rumore ~20 dB)
     ORD_DIR = 5            # ordine analitico (Directed)
     ORD_NN = 11            # ordine residuo / plane-wave NN
     DEVICE = "cpu"
@@ -92,7 +94,7 @@ def main():
         torch_dtype=torch.complex128,   # pipeline complessa stabile
         torch_device=DEVICE,
         train=True,                     # abilita training LOO
-        max_train_iter=10,              # 200 in Julia
+        max_train_iter=100,
         hard_sigma=True,                # vincoli hard su sigma (analytical simplex, neural >=0)
         sigma_soft_weight=10.0,         # usato se hard_sigma=False
     )

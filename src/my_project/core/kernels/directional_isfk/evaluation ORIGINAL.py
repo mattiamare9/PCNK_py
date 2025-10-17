@@ -5,7 +5,6 @@ Evaluation routines for Directional Spherical Bessel Kernels
 
 import torch
 import numpy as np
-import scipy.special as sp
 
 from my_project.core.background.differences import diff_mat_mat
 
@@ -16,15 +15,16 @@ def spherical_j0(z: torch.Tensor) -> torch.Tensor:
     mask = z == 0
     out[mask] = 1.0
     out[~mask] = torch.sin(z[~mask]) / z[~mask]
-    
-    # Cattura NaN e Inf e li sostituisce con zero (tensore complesso di zeri)
-    # Crea una maschera booleana che è True ovunque ci sia NaN o Inf (su entrambe le parti)
-    nan_inf_mask = torch.isnan(out) | torch.isinf(out)
-    
-    # Usa torch.where per sostituire i valori invalidi con zeri complessi.
-    # torch.zeros_like(out) crea un tensore complesso di zeri.
-    out = torch.where(nan_inf_mask, torch.zeros_like(out), out)
     return out
+
+
+# def _ensure_leading3(x: torch.Tensor) -> torch.Tensor:
+#     """Ensure x has leading dimension 3."""
+#     if x.ndim == 1:
+#         return x.view(3)
+#     elif x.ndim == 2 and x.shape[0] != 3:
+#         return x.T
+#     return x
 
 
 # ---- Single-direction evaluation -------------------------------------------------
@@ -51,46 +51,19 @@ def _eval_single_dir(k: torch.Tensor,
     beta_s = beta.reshape(()) if beta.numel() == 1 else beta   # scalar tensor if N==1
     sigma_s = sigma.reshape(()) if sigma.numel() == 1 else sigma
 
-    # Calcolo del fattore di normalizzazione stabile: exp(-beta) / i0e(beta)
-    # i0e = I0(beta) * exp(-|beta|). 
-    # Usiamo abs(beta) perché I0 è pari, ma i0e usa |beta|.
-     # BLOCCO DI CODICE SOSTITUITO PER STABILIZZAZIONE
-    # Calcolo stabile del fattore di normalizzazione 1/I0(beta) usando scipy.special.i0e
-    abs_beta_s = beta_s.abs().detach().cpu().numpy()
-    
-    # 1/I0(beta) = exp(-|beta|) / (I0(beta) * exp(-|beta|))
-    i0e_val = torch.from_numpy(sp.i0e(abs_beta_s)).to(device=beta.device, dtype=beta.dtype)
-    exp_minus_beta_s = torch.exp(-beta_s.abs())
-    
-    # [1/I0(beta)] fattore di normalizzazione
-    inv_i0_beta_s = exp_minus_beta_s / i0e_val
-    
-    # Conversione a complex per la moltiplicazione con spherical_j0(z)
-    inv_i0_beta_s = inv_i0_beta_s.to(dtype=j.dtype)
-    # -----------------------------------------------------------------
-    
     if x.ndim == 1:  # (3,)
         u = k * x - j * (beta_s * v_vec)            # (3,)
         s = (u * u).sum()                           # scalar
-        # NUOVA AZIONE CRITICA 1: Clamp sulla parte Reale/Immaginaria di s
-        # Questo limita |z| a circa sqrt(1e14) = 1e7, prevenendo il NaN nel gradiente
-        # s_real_clamped = torch.clamp(s.real, max=1e14)
-        # s_imag_clamped = torch.clamp(s.imag, min=-1e14, max=1e14)
-        # s = torch.complex(s_real_clamped, s_imag_clamped)
-
         z = torch.sqrt(s)
-
-        # SOSTITUZIONE NELLA RIGA: return sigma * spherical_j0(z) / torch.i0(beta)
-        return sigma * spherical_j0(z) * inv_i0_beta_s 
+        return sigma * spherical_j0(z) / torch.i0(beta)
 
     elif x.ndim == 2:  # (3,B)  -> return (B,)
         X = x                                            # (3,B)
         u = k * X - (j * beta_s) * v_vec[:, None]        # (3,B)
         s = (u * u).sum(dim=0)                           # (B,)
         z = torch.sqrt(s)                                # (B,)
-        # SOSTITUZIONE NELLA RIGA: return (sigma_s / torch.i0(beta_s)) * spherical_j0(z)
-        return (sigma_s * inv_i0_beta_s) * spherical_j0(z)  # (B,)
-    
+        return (sigma_s / torch.i0(beta_s)) * spherical_j0(z)  # (B,)
+
     elif x.ndim == 3:  # (3,B1,B2) -> flatten, eval, reshape back
         B1, B2 = x.shape[1], x.shape[2]
         x_flat = x.reshape(3, -1)                        # (3, B1*B2)
@@ -116,40 +89,18 @@ def _eval_multi_dir(k: torch.Tensor,
 
     j = torch.tensor(1j, dtype=torch.complex64 if x.dtype == torch.float32 else torch.complex128, device=x.device)
 
-     # Calcolo del fattore di normalizzazione stabile: exp(-beta) / i0e(beta)
-     # BLOCCO DI CODICE SOSTITUITO PER STABILIZZAZIONE
-    # Calcolo stabile del fattore di normalizzazione 1/I0(beta) usando scipy.special.i0e
-    abs_beta = beta.abs().detach().cpu().numpy()
-    
-    # 1/I0(beta) = exp(-|beta|) / (I0(beta) * exp(-|beta|))
-    i0e_vals = torch.from_numpy(sp.i0e(abs_beta)).to(device=beta.device, dtype=beta.dtype)
-    exp_minus_beta = torch.exp(-beta.abs())
-    
-    # [1/I0(beta)] fattore di normalizzazione (shape: (D,))
-    inv_i0_beta = exp_minus_beta / i0e_vals
-    
-    # Conversione a complex per la moltiplicazione con spherical_j0(z)
-    inv_i0_beta = inv_i0_beta.to(dtype=j.dtype)
-    # -----------------------------------------------------------------
-
     if x.ndim == 1:  # (3,)
         c = k * x[:, None] - j * (v * beta[None, :])   # (3,D)
         s = (c * c).sum(dim=0)  # (D,)
         z = torch.sqrt(s)
-        # SOSTITUZIONE NELLA RIGA: return torch.sum((sigma / torch.i0(beta)) * spherical_j0(z))
-        return torch.sum((sigma * inv_i0_beta) * spherical_j0(z))
+        return torch.sum((sigma / torch.i0(beta)) * spherical_j0(z))
 
     elif x.ndim == 2:  # (3,B)
         B = x.shape[1]
         c = k * x[:, None, :] - j * (v[:, :, None] * beta[None, :, None])  # (3,D,B)
         s = (c * c).sum(dim=0)  # (D,B)
-        # NUOVA AZIONE CRITICA 2: Clamp sulla parte Reale/Immaginaria di s
-        # s_real_clamped = torch.clamp(s.real, max=1e14)
-        # s_imag_clamped = torch.clamp(s.imag, min=-1e14, max=1e14)
-        # s = torch.complex(s_real_clamped, s_imag_clamped)
-
-        z = torch.sqrt(s)        # SOSTITUZIONE NELLA RIGA: return ((sigma / torch.i0(beta))[:, None] * spherical_j0(z)).sum(dim=0)
-        return ((sigma * inv_i0_beta)[:, None] * spherical_j0(z)).sum(dim=0)  # (B,)
+        z = torch.sqrt(s)
+        return ((sigma / torch.i0(beta))[:, None] * spherical_j0(z)).sum(dim=0)  # (B,)
 
     elif x.ndim == 3:  # (3,B1,B2)
         B1, B2 = x.shape[1], x.shape[2]
@@ -166,15 +117,10 @@ def eval_directional_single(a, x: torch.Tensor) -> torch.Tensor:
     """DirectionalSFKernel for one input."""
     x = _ensure_leading3(x)
     if a.v.shape[1] == 1:   # single direction
-        out = _eval_single_dir(a.k, x, a.v, a.sigma, a.beta)
+        return _eval_single_dir(a.k, x, a.v, a.sigma, a.beta)
     else:                   # multiple directions
-        out = _eval_multi_dir(a.k, x, a.v, a.sigma, a.beta)
-    
-    # PARACADUTE FINALE con torch.where
-    nan_inf_mask = torch.isnan(out) | torch.isinf(out)
-    out = torch.where(nan_inf_mask, torch.zeros_like(out), out)
-    
-    return out
+        return _eval_multi_dir(a.k, x, a.v, a.sigma, a.beta)
+
 
 def _ensure_leading3(x: torch.Tensor) -> torch.Tensor:
     """Ensure x has leading dimension 3: (3,), (3,B)."""

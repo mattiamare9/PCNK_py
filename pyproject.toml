@@ -9,12 +9,18 @@ packages = [{ include = "my_project", from = "src" }]
 
 [tool.poetry.dependencies]
 python = ">=3.12,<3.13"
-numpy = "1.26.*"
-scipy = "1.14.*"
-torch = "2.8.0"
-h5py = "3.12.*"
-pyyaml = "6.0.*"
-pylebedev = "1.1.*"
+# Core scientific stack
+numpy = "^1.26"
+scipy = "^1.14"
+torch = "^2.8"
+h5py = "^3.12"
+pyyaml = "^6.0"
+pylebedev = "^1.1"
+matplotlib = "^3.9"
+
+tqdm = "^4.66"
+pandas = "^2.2"
+seaborn = "^0.13"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3"
@@ -25,9 +31,7 @@ mypy = "^1.10"
 ipython = "^8.27"
 
 [tool.poetry.scripts]
-uniform-demo = "examples.uniform_kernel_demo:main"
-torch-bessel-training = "examples.torch_bessel_training:main"
 
 [build-system]
-requires = ["poetry-core"]
+requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"

@@ -1,5 +1,6 @@
-numpy
-scipy
-torch
-h5py
-pyyaml
+h5py==3.12.1
+matplotlib==3.10.7
+numpy==2.3.4
+pylebedev==1.1.0
+scipy==1.16.2
+torch==2.8.0

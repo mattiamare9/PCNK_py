@@ -1,0 +1,14 @@
+[SLURM] Job starting on cnode03.hpc.prv
+Mon Oct 20 01:46:57 AM CEST 2025
+[ENV] Python version:
+Python 3.12.11
+[ENV] Torch and NumPy:
+Torch 2.8.0+cu128 | CUDA 12.8 | NumPy 1.26.4
+[ENV] CUDA available:, False
+[RUN] Starting run_spm.py...
+Traceback (most recent call last):
+  File "/hpc/home/mmarella/my_project/examples/run_spm.py", line 5, in <module>
+    from my_project.core.spm import load_spm_h5, run_spm
+ModuleNotFoundError: No module named 'my_project'
+[DONE] Completed run:
+Mon Oct 20 01:47:36 AM CEST 2025

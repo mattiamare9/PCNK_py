@@ -1,0 +1,82 @@
+[SLURM] Job starting on cnode03.hpc.prv
+Mon Oct 20 09:17:43 AM CEST 2025
+[ENV] Python version:
+Python 3.12.11
+[ENV] Torch and NumPy:
+Torch 2.8.0+cu128 | CUDA 12.8 | NumPy 1.26.4
+[ENV] CUDA available:, False
+[RUN] Starting run_spm.py...
+Created new run directory: /hpc/home/mmarella/my_project/OUT_SPM/20251020_0917_ID034
+[450.0 Hz] K mean: 1.54e-01
+[450.0 Hz] A Condition Number: 6.49e+02
+[600.0 Hz] K mean: 1.32e-01
+[600.0 Hz] A Condition Number: 3.91e+02
+[750.0 Hz] K mean: 1.04e-01
+[750.0 Hz] A Condition Number: 2.22e+02
+[900.0 Hz] K mean: 8.95e-02
+[900.0 Hz] A Condition Number: 1.33e+02
+[1050.0 Hz] K mean: 8.21e-02
+[1050.0 Hz] A Condition Number: 9.51e+01
+[1200.0 Hz] K mean: 7.69e-02
+[1200.0 Hz] A Condition Number: 7.06e+01
+[1350.0 Hz] K mean: 6.91e-02
+[1350.0 Hz] A Condition Number: 5.21e+01
+[1500.0 Hz] K mean: 6.57e-02
+[1500.0 Hz] A Condition Number: 4.13e+01
+[pcnk] Training kernel at 0.0 Hz...
+[pcnk] Training kernel at 150.0 Hz...
+[pcnk] Training kernel at 300.0 Hz...
+[pcnk] Training kernel at 450.0 Hz...
+[450.0 Hz] K mean: 7.60e-01
+[450.0 Hz] A Condition Number: 6.51e+02
+[pcnk] Training kernel at 600.0 Hz...
+[600.0 Hz] K mean: 6.54e-01
+[600.0 Hz] A Condition Number: 4.03e+02
+[pcnk] Training kernel at 750.0 Hz...
+[750.0 Hz] K mean: 5.89e-01
+[750.0 Hz] A Condition Number: 2.62e+02
+[pcnk] Training kernel at 900.0 Hz...
+[900.0 Hz] K mean: 6.04e-01
+[900.0 Hz] A Condition Number: 2.39e+02
+[pcnk] Training kernel at 1050.0 Hz...
+[1050.0 Hz] K mean: 5.97e-01
+[1050.0 Hz] A Condition Number: 1.87e+02
+[pcnk] Training kernel at 1200.0 Hz...
+[1200.0 Hz] K mean: 5.69e-01
+[1200.0 Hz] A Condition Number: 1.53e+02
+[pcnk] Training kernel at 1350.0 Hz...
+[1350.0 Hz] K mean: 5.39e-01
+[1350.0 Hz] A Condition Number: 8.16e+01
+[pcnk] Training kernel at 1500.0 Hz...
+[1500.0 Hz] K mean: 5.82e-01
+[1500.0 Hz] A Condition Number: 9.43e+01
+[prop] Training kernel at 0.0 Hz...
+[prop] Training kernel at 150.0 Hz...
+[prop] Training kernel at 300.0 Hz...
+[prop] Training kernel at 450.0 Hz...
+[450.0 Hz] K mean: 6.66e-01
+[450.0 Hz] A Condition Number: 5.67e+02
+[prop] Training kernel at 600.0 Hz...
+[600.0 Hz] K mean: 6.01e-01
+[600.0 Hz] A Condition Number: 4.19e+02
+[prop] Training kernel at 750.0 Hz...
+[750.0 Hz] K mean: 5.04e-01
+[750.0 Hz] A Condition Number: 2.90e+02
+[prop] Training kernel at 900.0 Hz...
+[900.0 Hz] K mean: 5.38e-01
+[900.0 Hz] A Condition Number: 3.11e+02
+[prop] Training kernel at 1050.0 Hz...
+[1050.0 Hz] K mean: 5.41e-01
+[1050.0 Hz] A Condition Number: 3.69e+02
+[prop] Training kernel at 1200.0 Hz...
+[1200.0 Hz] K mean: 5.23e-01
+[1200.0 Hz] A Condition Number: 2.66e+02
+[prop] Training kernel at 1350.0 Hz...
+[1350.0 Hz] K mean: 5.14e-01
+[1350.0 Hz] A Condition Number: 1.16e+02
+[prop] Training kernel at 1500.0 Hz...
+[1500.0 Hz] K mean: 5.54e-01
+[1500.0 Hz] A Condition Number: 1.39e+02
+[DONE] SPM completed. Figures saved in: /hpc/home/mmarella/my_project/OUT_SPM/20251020_0917_ID034
+[DONE] Completed run:
+Mon Oct 20 09:18:14 AM CEST 2025

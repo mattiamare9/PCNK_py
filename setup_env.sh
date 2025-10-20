@@ -41,7 +41,7 @@ fi
 if [ "$ENV_CHANGED" = true ]; then
   echo "[ENV] Updating environment..."
   poetry config virtualenvs.in-project true
-  poetry install --no-root --sync
+  poetry install --sync
   echo "[ENV] Environment updated successfully."
 else
   echo "[ENV] No changes detected — skipping reinstallation."

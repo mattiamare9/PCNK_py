@@ -23,7 +23,7 @@ echo "[ENV] CUDA available:", $(python -c "import torch; print(torch.cuda.is_ava
 
 # --- Run experiment ---
 echo "[RUN] Starting run_spm.py..."
-python examples/run_spm.py
+poetry run python examples/run_spm.py
 
 echo "[DONE] Completed run:"
 date

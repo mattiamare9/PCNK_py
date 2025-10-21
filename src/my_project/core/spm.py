@@ -268,22 +268,22 @@ def _apply_sigma_constraints_hard(kernel: nn.Module) -> None:
                 p.data.copy_(torch.clamp(p.data, min=1e-3, max=600.0))
 
 
-def _sigma_soft_penalty(kernel: nn.Module, weight: float = 10.0) -> torch.Tensor:
-    """
-    Soft penalty if not using hard constraints:
-      - analytical sigma: (sum-1)^2 + ||neg||^2
-      - neural sigma:     ||neg||^2
-    """
-    device = next(kernel.parameters()).device if any(True for _ in kernel.parameters()) else torch.device("cpu")
-    loss = torch.zeros((), dtype=torch.float64, device=device)
+# def _sigma_soft_penalty(kernel: nn.Module, weight: float = 10.0) -> torch.Tensor:
+#     """
+#     Soft penalty if not using hard constraints:
+#       - analytical sigma: (sum-1)^2 + ||neg||^2
+#       - neural sigma:     ||neg||^2
+#     """
+#     device = next(kernel.parameters()).device if any(True for _ in kernel.parameters()) else torch.device("cpu")
+#     loss = torch.zeros((), dtype=torch.float64, device=device)
 
-    sig_a, sig_n = _collect_sigma_params(kernel)
+#     sig_a, sig_n = _collect_sigma_params(kernel)
 
-    for p in sig_a:
-        loss = loss + weight * ((torch.sum(p) - 1.0) ** 2 + torch.sum(torch.clamp(-p, min=0.0) ** 2))
-    for p in sig_n:
-        loss = loss + weight * (torch.sum(torch.clamp(-p, min=0.0) ** 2))
-    return loss
+#     for p in sig_a:
+#         loss = loss + weight * ((torch.sum(p) - 1.0) ** 2 + torch.sum(torch.clamp(-p, min=0.0) ** 2))
+#     for p in sig_n:
+#         loss = loss + weight * (torch.sum(torch.clamp(-p, min=0.0) ** 2))
+#     return loss
 
 
 # =========================
@@ -461,11 +461,10 @@ def train_kernel_lbfgs(
 
         # NEW: applica vincoli hard prima del forward per evitare NaN in K
         _apply_sigma_constraints_hard(kernel)
-
         loss = loo(kernel, X, y, lam)
 
-        if not hard_sigma:
-            loss = loss + _sigma_soft_penalty(kernel, weight=sigma_soft_weight)
+        # if not hard_sigma:
+        #     loss = loss + _sigma_soft_penalty(kernel, weight=sigma_soft_weight)
 
         # failsafe: se loss non finita, restituisco loss grande
         if not torch.isfinite(loss):
@@ -561,7 +560,6 @@ def run_spm(
             else:
                 reg = reg_a + reg_n if hasattr(kernel, "AnalyticalKernel") or hasattr(kernel, "analytical") else reg_n
                 A = K + (lam * reg) * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
-            # A = K + lam * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
 
             alpha = _torch_solve(A, y_f)
             # ------------------ CONTROLLO STABILITÀ ------------------
@@ -574,8 +572,6 @@ def run_spm(
                 print(f"  K contains NaN: {torch.isnan(K).any()}")
                 print(f"  K contains Inf: {torch.isinf(K).any()}")
                 print(f"  k value: {k}")
-                # Skip this frequency or use fallback
-                #continue
             
             # Controlla il condizionamento (CN) di A. Un CN > 1e12 è problematico.
             CN = np.linalg.cond(A.detach().cpu().numpy())

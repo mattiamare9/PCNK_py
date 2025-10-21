@@ -87,16 +87,30 @@ def load_spm_h5(path: str | Path) -> SPMData:
 # Helpers
 # =========================
 
-def add_awgn(sig: np.ndarray, snr_db: Optional[float]) -> np.ndarray:
+def add_awgn(sig: np.ndarray, snr_db: float) -> np.ndarray:
+    """Replica la riga Julia:
+    ir = ir0 + 10^(-SNR/20) * std(ir0, dims=1) .* randn(...)
+    """
     if snr_db is None:
         return sig
-    snr = 10.0 ** (snr_db / 10.0)
-    power = np.mean(np.abs(sig) ** 2)
-    noise_power = power / max(snr, 1e-12)
-    noise = np.sqrt(noise_power / 2.0) * (
+    snr_amp = 10 ** (-snr_db / 20)  # fattore di ampiezza (non potenza)
+    std_per_freq = np.std(sig, axis=1, keepdims=True)  # std per riga (frequenza)
+    noise = snr_amp * std_per_freq * (
         np.random.randn(*sig.shape) + 1j * np.random.randn(*sig.shape)
     )
     return sig + noise
+
+# prvious wrong implementation (global average instead of per frequency avg)
+# def add_awgn(sig: np.ndarray, snr_db: Optional[float]) -> np.ndarray:
+#     if snr_db is None:
+#         return sig
+#     snr = 10.0 ** (snr_db / 10.0)
+#     power = np.mean(np.abs(sig) ** 2)
+#     noise_power = power / max(snr, 1e-12)
+#     noise = np.sqrt(noise_power / 2.0) * (
+#         np.random.randn(*sig.shape) + 1j * np.random.randn(*sig.shape)
+#     )
+#     return sig + noise
 
 
 def nmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -310,32 +324,57 @@ def _safe_Kinv_and_diag(A: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     return Kinv, diag
 
 
-def _loo_core(K: torch.Tensor, y: torch.Tensor, reg: torch.Tensor, lam: float) -> torch.Tensor:
-    A = K + lam * reg * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
-    Kinv, d = _safe_Kinv_and_diag(A)
-    alpha = Kinv @ y
+# def _loo_core(K: torch.Tensor, y: torch.Tensor, lam: float) -> torch.Tensor:
+#     A = K + lam * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
+#     Kinv, d = _safe_Kinv_and_diag(A)
+#     alpha = Kinv @ y
+#     return torch.sum(torch.abs(alpha / d) ** 2)
+
+# --- core LOO with REG_n on the diagonal (Julia-consistent) --------------------
+def _loo_core(K: torch.Tensor, y: torch.Tensor, lam: float, reg: torch.Tensor) -> torch.Tensor:
+    """
+    L_LOO = sum_i | (alpha_i / diag(inv(A))_i ) |^2
+    with A = K + lam * reg * I   (reg = reg_n for PCNK and Proposed)
+    """
+    # scalarize reg to a 0-d tensor on the right device/dtype
+    # reg = torch.as_tensor(reg, dtype=K.dtype, device=K.device)
+    # if reg.ndim > 0:
+    #     reg = reg.reshape(())
+    A = K + (lam * reg) * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
+
+    Kinv, d = _safe_Kinv_and_diag(A)       # d = diag(inv(A))
+    alpha = Kinv @ y                       # alpha = inv(A) @ y
     return torch.sum(torch.abs(alpha / d) ** 2)
 
 
+# --- PCNK (neural residual only) -----------------------------------------------
 def _loo_loss_pcnk(kernel: nn.Module, X: torch.Tensor, y: torch.Tensor, lam: float) -> torch.Tensor:
+    """
+    Julia PCNK:  L = L_LOO(A=K+lam*reg_n*I) + 0.5 * reg_n
+    """
     K = kernel(X, X)
-    _, reg_n = _reg_terms(kernel)
-    reg = reg_n if torch.isfinite(reg_n) else torch.zeros((), dtype=K.dtype, device=K.device)
-    return _loo_core(K, y, reg, lam)
+    _, reg_n = _reg_terms(kernel)          # neural regularizer only
+    return _loo_core(K, y, lam, reg_n) + 0.5 * reg_n
 
 
+# --- Proposed / DirectedResidualPIN (analytical + neural) ----------------------
 def _loo_loss_prop(kernel: nn.Module, X: torch.Tensor, y: torch.Tensor, lam: float) -> torch.Tensor:
+    """
+    Julia Proposed:  L = L_LOO(A=K+lam*reg_n*I) + reg_a + 0.5 * reg_n
+    (note: LOO still uses ONLY reg_n on the diagonal)
+    """
     K = kernel(X, X)
-    reg_a, reg_n = _reg_terms(kernel)
-    reg = (reg_a + reg_n) if (torch.isfinite(reg_a) and torch.isfinite(reg_n)) else torch.zeros((), dtype=K.dtype, device=K.device)
-    return _loo_core(K, y, reg, lam) + 0.5 * reg_n
+    reg_a, reg_n = _reg_terms(kernel)      # analytical + neural penalties
+    return _loo_core(K, y, lam, reg_n) + reg_a + 0.5 * reg_n
 
 
 def _choose_loo_loss(kernel: nn.Module) -> Callable[[nn.Module, torch.Tensor, torch.Tensor, float], torch.Tensor]:
     """
     If analytical part exists → PROPOSED loss; else → PCNK loss.
     """
-    has_analytical = hasattr(kernel, "AnalyticalKernel") or hasattr(kernel, "analytical") or hasattr(kernel, "analytical_kernel")
+    has_analytical = any(
+        hasattr(kernel, a) for a in ["AnalyticalKernel", "analytical", "analytical_kernel"]
+    )
     return _loo_loss_prop if has_analytical else _loo_loss_pcnk
 
 
@@ -415,7 +454,7 @@ def train_kernel_lbfgs(
         return
 
     loo = _choose_loo_loss(kernel)
-    optimizer = torch.optim.LBFGS(params, lr=0.8, max_iter=max_iter)
+    optimizer = torch.optim.LBFGS(params, lr=0.3, max_iter=max_iter)
 
     def closure():
         optimizer.zero_grad()
@@ -475,10 +514,9 @@ def run_spm(
     Y_np = np.asarray(data.recordings)     # (F, M) complex
     Yv_np = np.asarray(data.validation)    # (F, Mv) complex
     grid = np.asarray(data.xyz_pointwise) if data.xyz_pointwise is not None else None
-
-    # noise injection to match SNR
+    # noise injection to match SNR, olty on train!!
     Y_np = add_awgn(Y_np, snr_db)
-    Yv_np = add_awgn(Yv_np, snr_db)
+    # Yv_np = add_awgn(Yv_np, snr_db)
 
     results: Dict[str, Dict[str, np.ndarray]] = {}
 
@@ -523,33 +561,40 @@ def run_spm(
             else:
                 reg = reg_a + reg_n if hasattr(kernel, "AnalyticalKernel") or hasattr(kernel, "analytical") else reg_n
                 A = K + (lam * reg) * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
+            # A = K + lam * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
 
             alpha = _torch_solve(A, y_f)
-            # ---
-            if freq > 400.0:
-                # Controlla la matrice K
-                print(f"[{freq} Hz] K mean: {K.abs().mean().item():.2e}")
-                
-                # Add this debug code to your SPM run before the condition number calculation
-                if torch.isnan(K).any() or torch.isinf(K).any():
-                    print(f"!!! KERNEL PROBLEM at {freq} Hz:")
-                    print(f"  K contains NaN: {torch.isnan(K).any()}")
-                    print(f"  K contains Inf: {torch.isinf(K).any()}")
-                    print(f"  k value: {k}")
-                    # Skip this frequency or use fallback
-                    #continue
-                
-                # Controlla il condizionamento (CN) di A. Un CN > 1e12 è problematico.
-                CN = np.linalg.cond(A.detach().cpu().numpy())
-                print(f"[{freq} Hz] A Condition Number: {CN:.2e}")
+            # ------------------ CONTROLLO STABILITÀ ------------------
+            # Controlla la matrice K
+            print(f"[{freq} Hz] K mean: {K.abs().mean().item():.2e}")
+            
+            # Add this debug code to your SPM run before the condition number calculation
+            if torch.isnan(K).any() or torch.isinf(K).any():
+                print(f"!!! KERNEL PROBLEM at {freq} Hz:")
+                print(f"  K contains NaN: {torch.isnan(K).any()}")
+                print(f"  K contains Inf: {torch.isinf(K).any()}")
+                print(f"  k value: {k}")
+                # Skip this frequency or use fallback
+                #continue
+            
+            # Controlla il condizionamento (CN) di A. Un CN > 1e12 è problematico.
+            CN = np.linalg.cond(A.detach().cpu().numpy())
+            print(f"[{freq} Hz] A Condition Number: {CN:.2e}")
 
-                # Se CN è troppo grande, c'è l'instabilità.
-                if CN > 1e10:
-                    print("!!! WARNING: KRR Matrix A is ill-conditioned, likely leading to NaN/Inf")
-            #---
+            # Se CN è troppo grande, c'è l'instabilità.
+            if CN > 1e10:
+                print("!!! WARNING: KRR Matrix A is ill-conditioned, likely leading to NaN/Inf")
+            #--------------FINE CONTROLLO STABILITÀ ------------------
 
             Kv = kernel(Xv, X)
             yv_hat = Kv @ alpha
+            # ------- DEBUG PRINT------- subito dopo yv_hat = Kv @ alpha
+            yt = yv_f.detach().cpu().numpy()
+            yp = yv_hat.detach().cpu().numpy()
+            num = np.linalg.norm(yt - yp)**2
+            den = np.linalg.norm(yt)**2 + 1e-12
+            print(f"[{freq:.0f} Hz] ||y_true||^2={den:.3e}  ||err||^2={num:.3e}  NMSE={num/den:.3e}")
+            # ------- FINE DEBUG PRINT-------
 
             nmse_list.append(nmse(yv_f.detach().cpu().numpy(), yv_hat.detach().cpu().numpy()))
             coeffs_list.append(alpha.detach().cpu().numpy())

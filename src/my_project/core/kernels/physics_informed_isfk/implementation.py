@@ -122,7 +122,9 @@ def plane_wave_pin_kernel(
     """Factory mirroring Julia non-generic constructors."""
     return PlaneWavePINKernel(k, ord=ord, W=W, dtype=dtype, device=device)
 
-
+# --------------------------------------------------------------------------
+# directional + residual
+# --------------------------------------------------------------------------
 class DirectedResidualPINKernel(CompositeKernelBase):
     """
     Physics-informed kernel: directional spherical-Bessel analytical term

@@ -111,6 +111,17 @@ def eval_discrete_kernel_pair(a, x1: torch.Tensor, x2: torch.Tensor) -> torch.Te
 
 
 def eval_neural_kernel_pair(a, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tensor:
+    """
+    prepares the effective weights sigma_eff before passing them to the generic
+    _isfkernel_eval routine, matching the logic of the Julia
+    NeuralWeightPlaneWaveKernel function dispatch.
+    in Julia σ = a.σ .* dropdims(a.W(a.k * a.v), dims = 1)
+
+    here :  k * v is calculated (kv = k_real * v_real)
+    Wout = a.W(kv.T).squeeze(-1)    W outputs a scalar weight for each direction.
+    sigma_eff = a.sigma * Wout  Multiplies the baseline sigma by the 
+    neural output W_out to get the effective weights sigma_eff
+    """
     # net_dtype = next(a.W.parameters()).dtype
     # kv = (a.k.to(dtype=net_dtype, device=a.v.device) * a.v.to(dtype=net_dtype))
     #---

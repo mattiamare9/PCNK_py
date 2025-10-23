@@ -6,6 +6,7 @@ from my_project.core.spm import load_spm_h5, run_spm
 from my_project.core.kernels import (
     uniform_kernel,
     plane_wave_pin_kernel,
+    plane_wave_kernel,
     directed_residual_pin_kernel,
 )
 from my_project.config import DATA_DIR, OUTPUT_DIR
@@ -45,7 +46,7 @@ def main():
     SNR_DB = 20.0
     LAMBDA = .0011         # λ di Julia (varianza del rumore ~20 dB)
     ORD_DIR = 5            # ordine analitico (Directed)
-    ORD_NN = 11            # ordine residuo / plane-wave NN
+    ORD_NN = 11            # ordine residuo / plane-wave NN (50 points)
     DEVICE = "cpu"
 
     # === Carica dataset ===
@@ -59,10 +60,24 @@ def main():
         # baseline: nessun training (σ fisso implicito nel kernel)
         return uniform_kernel(k, dtype=torch.complex128, device=DEVICE)
 
+    # def pcnk_factory(k: float):
+    #     # PlaneWave PIN (Uniform + Neural residual), ma qui usiamo
+    #     # il costruttore specifico "plane_wave_pin_kernel" (analytical=Uniform ISF + neural plane-wave)
+    #     # return plane_wave_pin_kernel(k, ord=ORD_NN, W=W, dtype=torch.complex128, device=DEVICE)
+    
     def pcnk_factory(k: float):
-        # PlaneWave PIN (Uniform + Neural residual), ma qui usiamo
-        # il costruttore specifico "plane_wave_pin_kernel" (analytical=Uniform ISF + neural plane-wave)
-        return plane_wave_pin_kernel(k, ord=ORD_NN, W=W, dtype=torch.complex128, device=DEVICE)
+        """
+        Plane-Wave PCNK kernel (NeuralWeightPlaneWaveKernel analogue):
+        uses Lebedev grid (ord=ORD_NN) and neural weight W.
+        """
+        return plane_wave_kernel(
+            k,
+            ord=ORD_NN,           # Lebedev order, like Julia’s Ord_NN
+            W=W,                  # neural weight network
+            dtype=torch.complex128,
+            device=DEVICE,
+        )
+
 
     def prop_factory(k: float):
         # Proposed: Directed analytical + Neural residual

@@ -141,14 +141,55 @@ def _get_attr(obj, *names):
     return None
 
 
+# def _reg_terms(kernel: nn.Module) -> Tuple[torch.Tensor, torch.Tensor]:
+#     """
+#     Extract reg_a (analytical) and reg_n (neural) as in Julia:
+#       reg_n = sum( W(v) * sigma_neural )
+#       reg_a = sum( sigma_analytical )
+#     Returns (reg_a, reg_n) as scalar tensors (0 if not applicable).
+#     """
+#     # device heuristic
+#     try:
+#         device = next(kernel.parameters()).device
+#     except StopIteration:
+#         device = torch.device("cpu")
+
+#     z = torch.zeros((), dtype=torch.float64, device=device)
+
+#     # --- neural part ---
+#     reg_n = z
+#     neu = _get_attr(kernel, "NeuralKernel", "neural", "neural_kernel")
+#     if neu is not None:
+#         W = _get_attr(neu, "W", "w")
+#         v = _get_attr(neu, "v", "V")
+#         sigma = _get_attr(neu, "sigma", "σ")
+#         if callable(W) and (v is not None) and (sigma is not None):
+#             # Julia passes v as (3, N); PyTorch expects (N, 3)
+#             v_in = v.T if (v.ndim == 2 and v.shape[0] == 3) else v
+#             out_raw = W(v_in)               # shape (N,) or (N,1)
+#             out = cast(torch.Tensor, out_raw)
+#             out = out.squeeze()
+#             reg_n = torch.sum(torch.real(out) * sigma.reshape(-1))
+
+#     # --- analytical part ---
+#     reg_a = z
+#     ana = _get_attr(kernel, "AnalyticalKernel", "analytical", "analytical_kernel")
+#     if ana is not None:
+#         sigma_a = _get_attr(ana, "sigma", "σ")
+#         if sigma_a is not None:
+#             reg_a = torch.sum(torch.real(sigma_a.reshape(-1)))
+
+#     return reg_a, reg_n
+
 def _reg_terms(kernel: nn.Module) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Extract reg_a (analytical) and reg_n (neural) as in Julia:
       reg_n = sum( W(v) * sigma_neural )
       reg_a = sum( sigma_analytical )
-    Returns (reg_a, reg_n) as scalar tensors (0 if not applicable).
+    Works with both composite kernels (with .neural) and
+    standalone neural kernels (NeuralWeightPlaneWaveKernel).
     """
-    # device heuristic
+    # Device fallback
     try:
         device = next(kernel.parameters()).device
     except StopIteration:
@@ -156,22 +197,29 @@ def _reg_terms(kernel: nn.Module) -> Tuple[torch.Tensor, torch.Tensor]:
 
     z = torch.zeros((), dtype=torch.float64, device=device)
 
-    # --- neural part ---
+    # ---------------------------
+    # Neural component
+    # ---------------------------
     reg_n = z
+    # For composites → look inside .neural
     neu = _get_attr(kernel, "NeuralKernel", "neural", "neural_kernel")
+    # For standalone neural kernels → the kernel *is* the neural part
+    if neu is None and hasattr(kernel, "W") and hasattr(kernel, "v"):
+        neu = kernel
+
     if neu is not None:
         W = _get_attr(neu, "W", "w")
         v = _get_attr(neu, "v", "V")
         sigma = _get_attr(neu, "sigma", "σ")
         if callable(W) and (v is not None) and (sigma is not None):
-            # Julia passes v as (3, N); PyTorch expects (N, 3)
+            # Julia uses (3, N); PyTorch expects (N, 3)
             v_in = v.T if (v.ndim == 2 and v.shape[0] == 3) else v
-            out_raw = W(v_in)               # shape (N,) or (N,1)
-            out = cast(torch.Tensor, out_raw)
-            out = out.squeeze()
+            out = W(v_in).squeeze()
             reg_n = torch.sum(torch.real(out) * sigma.reshape(-1))
 
-    # --- analytical part ---
+    # ---------------------------
+    # Analytical component
+    # ---------------------------
     reg_a = z
     ana = _get_attr(kernel, "AnalyticalKernel", "analytical", "analytical_kernel")
     if ana is not None:
@@ -181,31 +229,66 @@ def _reg_terms(kernel: nn.Module) -> Tuple[torch.Tensor, torch.Tensor]:
 
     return reg_a, reg_n
 
-
 # =========================
 # Sigma constraints
 # =========================
 
-def _collect_sigma_params(kernel: nn.Module) -> Tuple[List[torch.nn.Parameter], List[torch.nn.Parameter]]:
+def _collect_sigma_params(kernel: nn.Module) -> Tuple[list[torch.nn.Parameter], list[torch.nn.Parameter]]:
     """
     Return (sigma_analytical_params, sigma_neural_params) from submodules if present.
-    """
-    sig_a: List[torch.nn.Parameter] = []
-    sig_n: List[torch.nn.Parameter] = []
 
+    Handles both:
+      - Composite kernels (with .analytical / .neural submodules)
+      - Standalone neural kernels (e.g., NeuralWeightPlaneWaveKernel)
+    """
+    sig_a: list[torch.nn.Parameter] = []
+    sig_n: list[torch.nn.Parameter] = []
+
+    # ------------------------------
+    # Analytical part
+    # ------------------------------
     ana = _get_attr(kernel, "AnalyticalKernel", "analytical", "analytical_kernel")
     if ana is not None:
         for name, p in ana.named_parameters(recurse=True):
             if "sigma" in name.lower() or "σ" in name:
                 sig_a.append(p)
 
+    # ------------------------------
+    # Neural part
+    # ------------------------------
     neu = _get_attr(kernel, "NeuralKernel", "neural", "neural_kernel")
+    # if no explicit neural submodule, kernel itself may be the neural one
+    if neu is None and hasattr(kernel, "W") and hasattr(kernel, "v"):
+        neu = kernel
+
     if neu is not None:
         for name, p in neu.named_parameters(recurse=True):
             if "sigma" in name.lower() or "σ" in name:
                 sig_n.append(p)
 
     return sig_a, sig_n
+
+
+# def _collect_sigma_params(kernel: nn.Module) -> Tuple[List[torch.nn.Parameter], List[torch.nn.Parameter]]:
+#     """
+#     Return (sigma_analytical_params, sigma_neural_params) from submodules if present.
+#     """
+#     sig_a: List[torch.nn.Parameter] = []
+#     sig_n: List[torch.nn.Parameter] = []
+
+#     ana = _get_attr(kernel, "AnalyticalKernel", "analytical", "analytical_kernel")
+#     if ana is not None:
+#         for name, p in ana.named_parameters(recurse=True):
+#             if "sigma" in name.lower() or "σ" in name:
+#                 sig_a.append(p)
+
+#     neu = _get_attr(kernel, "NeuralKernel", "neural", "neural_kernel")
+#     if neu is not None:
+#         for name, p in neu.named_parameters(recurse=True):
+#             if "sigma" in name.lower() or "σ" in name:
+#                 sig_n.append(p)
+
+#     return sig_a, sig_n
 
 
 def _project_simplex_1d(v: torch.Tensor) -> torch.Tensor:
@@ -227,20 +310,6 @@ def _project_simplex_1d(v: torch.Tensor) -> torch.Tensor:
     w = torch.clamp(g - theta, min=0.0)
     return w
 
-
-# def _apply_sigma_constraints_hard(kernel: nn.Module) -> None:
-#     """
-#     Hard constraints:
-#       - analytical sigma → simplex (sum=1, sigma>=0)
-#       - neural sigma     → non-negativity (ReLU)
-#     """
-#     sig_a, sig_n = _collect_sigma_params(kernel)
-#     with torch.no_grad():
-#         for p in sig_a:
-#             new_p = _project_simplex_1d(p.data)
-#             p.data.copy_(new_p)
-#         for p in sig_n:
-#             p.data.copy_(torch.clamp(p.data, min=0.0))
 
 def _apply_sigma_constraints_hard(kernel: nn.Module) -> None:
     """
@@ -354,7 +423,7 @@ def _loo_loss_pcnk(kernel: nn.Module, X: torch.Tensor, y: torch.Tensor, lam: flo
     """
     K = kernel(X, X)
     _, reg_n = _reg_terms(kernel)          # neural regularizer only
-    return _loo_core(K, y, lam, reg_n) + 0.5 * reg_n
+    return _loo_core(K, y, lam, reg_n) # + 0.5 * reg_n
 
 
 # --- Proposed / DirectedResidualPIN (analytical + neural) ----------------------

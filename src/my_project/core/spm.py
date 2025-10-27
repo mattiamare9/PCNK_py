@@ -26,17 +26,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple, List, cast
+from typing import Callable, Dict, Optional, Tuple, cast, Any
 
 import numpy as np
 import h5py
-import matplotlib
-matplotlib.use("Agg")  # oppure in env: MPLBACKEND=Agg
-import matplotlib.pyplot as plt
+
 
 import torch
 from torch import nn
 
+from my_project.utils.plot_utils import plot_field_map, plot_nmse
 
 # -------------------------
 # Constants
@@ -134,7 +133,7 @@ def _torch_solve(A: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 # Regularization terms (reg_a, reg_n)
 # =========================
 
-def _get_attr(obj, *names):
+def _get_attr(obj: Any, *names: str) -> Any:
     for n in names:
         if hasattr(obj, n):
             return getattr(obj, n)
@@ -181,6 +180,14 @@ def _get_attr(obj, *names):
 
 #     return reg_a, reg_n
 
+# could be used in reg_terms and project simplex...
+def _resolve_neural_part(kernel: nn.Module) -> Optional[nn.Module]:
+    neu = _get_attr(kernel, "NeuralKernel", "neural", "neural_kernel")
+    if neu is None and hasattr(kernel, "W") and hasattr(kernel, "v"):
+        return kernel
+    return neu
+
+
 def _reg_terms(kernel: nn.Module) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Extract reg_a (analytical) and reg_n (neural) as in Julia:
@@ -214,7 +221,7 @@ def _reg_terms(kernel: nn.Module) -> Tuple[torch.Tensor, torch.Tensor]:
         if callable(W) and (v is not None) and (sigma is not None):
             # Julia uses (3, N); PyTorch expects (N, 3)
             v_in = v.T if (v.ndim == 2 and v.shape[0] == 3) else v
-            out = W(v_in).squeeze()
+            out = cast(torch.Tensor, W(v_in)).squeeze() # cast just for Pylance
             reg_n = torch.sum(torch.real(out) * sigma.reshape(-1))
 
     # ---------------------------
@@ -448,59 +455,6 @@ def _choose_loo_loss(kernel: nn.Module) -> Callable[[nn.Module, torch.Tensor, to
 
 
 # =========================
-# Plotting
-# =========================
-
-def plot_nmse(freqs: np.ndarray, nmse_db_by_kernel: Dict[str, np.ndarray], out_dir: Path) -> None:
-    plt.figure()
-    for name, nmse_arr in nmse_db_by_kernel.items():
-        plt.plot(freqs, 10.0 * np.log10(nmse_arr + 1e-12), label=name)
-    plt.xlabel("Frequency [Hz]")
-    plt.ylabel("NMSE [dB]")
-    plt.title("NMSE vs Frequency")
-    plt.grid(True)
-    plt.legend()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    plt.tight_layout()
-    plt.savefig(out_dir / "NMSE.pdf")
-    plt.close()
-
-
-def _infer_grid_shape(xyz: np.ndarray) -> Tuple[int, int, np.ndarray, np.ndarray]:
-    xs = np.unique(np.round(xyz[:, 0], 12))
-    ys = np.unique(np.round(xyz[:, 1], 12))
-    Nx, Ny = len(xs), len(ys)
-    if Nx * Ny != xyz.shape[0]:
-        side = int(np.sqrt(xyz.shape[0]))
-        xs = np.linspace(xyz[:, 0].min(), xyz[:, 0].max(), side)
-        ys = np.linspace(xyz[:, 1].min(), xyz[:, 1].max(), side)
-        Nx, Ny = len(xs), len(ys)
-    return Ny, Nx, xs, ys
-
-
-def _values_to_image(xyz_grid: np.ndarray, values: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    Ny, Nx, xs, ys = _infer_grid_shape(xyz_grid)
-    order = np.lexsort((np.round(xyz_grid[:, 0], 12), np.round(xyz_grid[:, 1], 12)))
-    Z = np.abs(values[order]).reshape(Ny, Nx)
-    return xs, ys, Z
-
-
-def plot_field_map(xyz_grid: np.ndarray, field_vals: np.ndarray, title: str, out_path: Path) -> None:
-    X, Y, Z = _values_to_image(xyz_grid, field_vals)
-    plt.figure()
-    extent = (X.min(), X.max(), Y.min(), Y.max())
-    plt.imshow(Z, origin="lower", extent=extent, aspect="equal")
-    plt.colorbar()
-    plt.xlabel("x [m]")
-    plt.ylabel("y [m]")
-    plt.title(title)
-    plt.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path)
-    plt.close()
-
-
-# =========================
 # Training (LBFGS + LOO + sigma constraints)
 # =========================
 
@@ -511,8 +465,6 @@ def train_kernel_lbfgs(
     lam: float,
     *,
     max_iter: int = 200,
-    hard_sigma: bool = True,
-    sigma_soft_weight: float = 10.0,
 ) -> None:
     """
     Train kernel parameters using LBFGS with a LOO loss (Julia-style),
@@ -523,7 +475,7 @@ def train_kernel_lbfgs(
         return
 
     loo = _choose_loo_loss(kernel)
-    optimizer = torch.optim.LBFGS(params, lr=0.3, max_iter=max_iter)
+    optimizer = torch.optim.LBFGS(params, lr=0.3, max_iter=max_iter, line_search_fn='strong_wolfe')
 
     def closure():
         optimizer.zero_grad()
@@ -544,9 +496,8 @@ def train_kernel_lbfgs(
 
     optimizer.step(closure)
 
-    # Apply hard constraints after step (if requested)
-    if hard_sigma:
-        _apply_sigma_constraints_hard(kernel)
+    # Apply hard constraints after step (analytical simplex, neural >=0)
+    _apply_sigma_constraints_hard(kernel)
 
 
 # =========================
@@ -564,8 +515,6 @@ def run_spm(
     torch_device: Optional["torch.device | str"] = None,
     train: bool = True,
     max_train_iter: int = 200,
-    hard_sigma: bool = True,
-    sigma_soft_weight: float = 10.0,
 ) -> Dict[str, Dict[str, np.ndarray]]:
     """
     Run SPM across frequencies for one or more kernels with LOO training (LBFGS) and sigma constraints.
@@ -612,8 +561,6 @@ def run_spm(
                 train_kernel_lbfgs(
                     kernel, X, Y[f_idx, :], lam,
                     max_iter=max_train_iter,
-                    hard_sigma=hard_sigma,
-                    sigma_soft_weight=sigma_soft_weight,
                 )
 
             # --- evaluation stage (KRR with Julia-style reg) ---

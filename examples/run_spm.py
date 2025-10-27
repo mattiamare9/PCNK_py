@@ -109,9 +109,7 @@ def main():
         torch_dtype=torch.complex128,   # pipeline complessa stabile
         torch_device=DEVICE,
         train=True,                     # abilita training LOO
-        max_train_iter=10,
-        hard_sigma=True,                # vincoli hard su sigma (analytical simplex, neural >=0)
-        sigma_soft_weight=10.0,         # usato se hard_sigma=False
+        max_train_iter=100,
     )
 
     print(f"[DONE] SPM completed. Figures saved in: {out_dir}")

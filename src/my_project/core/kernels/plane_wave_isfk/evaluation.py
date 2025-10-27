@@ -126,7 +126,6 @@ def eval_neural_kernel_pair(a, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tens
     # kv = (a.k.to(dtype=net_dtype, device=a.v.device) * a.v.to(dtype=net_dtype))
     #---
     net_dtype = torch.float64 if a.v.dtype == torch.float64 else torch.float32
-
     # assicura che k e v siano REALI, sullo stesso device/dtype
     k_real = torch.as_tensor(a.k, device=a.v.device).real.to(net_dtype)
     v_real = a.v.to(dtype=net_dtype, device=a.v.device)

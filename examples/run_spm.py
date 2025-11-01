@@ -109,7 +109,7 @@ def main():
         torch_dtype=torch.complex128,   # pipeline complessa stabile
         torch_device=DEVICE,
         train=True,                     # abilita training LOO
-        max_train_iter=100,
+        max_train_iter=400,
     )
 
     print(f"[DONE] SPM completed. Figures saved in: {out_dir}")

@@ -85,6 +85,15 @@ def load_spm_h5(path: str | Path) -> SPMData:
 # =========================
 # Helpers
 # =========================
+def is_proposed(kernel: nn.Module) -> bool:
+    """
+    Detects whether the kernel includes an analytical part
+    (i.e. DirectedResidual/Proposed type).
+    """
+    return any(
+        hasattr(kernel, a)
+        for a in ["AnalyticalKernel", "analytical", "analytical_kernel"]
+    )
 
 def add_awgn(sig: np.ndarray, snr_db: float) -> np.ndarray:
     """Replica la riga Julia:
@@ -435,23 +444,104 @@ def _loo_loss_pcnk(kernel: nn.Module, X: torch.Tensor, y: torch.Tensor, lam: flo
 
 # --- Proposed / DirectedResidualPIN (analytical + neural) ----------------------
 def _loo_loss_prop(kernel: nn.Module, X: torch.Tensor, y: torch.Tensor, lam: float) -> torch.Tensor:
-    """
-    Julia Proposed:  L = L_LOO(A=K+lam*reg_n*I) + reg_a + 0.5 * reg_n
-    (note: LOO still uses ONLY reg_n on the diagonal)
-    """
     K = kernel(X, X)
-    reg_a, reg_n = _reg_terms(kernel)      # analytical + neural penalties
-    return _loo_core(K, y, lam, reg_n) + reg_a + 0.5 * reg_n
+    reg_a, reg_n = _reg_terms(kernel)
+    # Julia: L = LOO with A = K + λ·(reg_a + reg_n)·I  + 0.5·reg_n
+    return _loo_core(K, y, lam, reg_a + reg_n) + 0.5 * reg_n
+# def _loo_loss_prop(kernel: nn.Module, X: torch.Tensor, y: torch.Tensor, lam: float) -> torch.Tensor:
+#     """
+#     Julia Proposed:  L = L_LOO(A=K+lam*reg_n*I) + reg_a + 0.5 * reg_n
+#     (note: LOO still uses ONLY reg_n on the diagonal)
+#     """
+#     K = kernel(X, X)
+#     reg_a, reg_n = _reg_terms(kernel)      # analytical + neural penalties
+#     return _loo_core(K, y, lam, reg_n) + reg_a + 0.5 * reg_n
 
 
 def _choose_loo_loss(kernel: nn.Module) -> Callable[[nn.Module, torch.Tensor, torch.Tensor, float], torch.Tensor]:
     """
     If analytical part exists → PROPOSED loss; else → PCNK loss.
     """
-    has_analytical = any(
-        hasattr(kernel, a) for a in ["AnalyticalKernel", "analytical", "analytical_kernel"]
+    # has_analytical = any(
+    #     hasattr(kernel, a) for a in ["AnalyticalKernel", "analytical", "analytical_kernel"]
+    # )
+    # return _loo_loss_prop if has_analytical else _loo_loss_pcnk
+    return _loo_loss_prop if is_proposed(kernel) else _loo_loss_pcnk
+
+
+# =========================
+# Training IPNewton
+# =========================
+
+from scipy.optimize import minimize
+
+
+def train_kernel_scipy(kernel, X, y, lam, max_iter=200):
+    """
+    Constrained optimization (trust-constr) — Python analogue of Julia's IPNewton.
+    Enforces positivity + sum=1 on sigma (analytical part).
+    """
+
+    # --- Flatten all trainable parameters into a 1D vector ---
+    params = [p for p in kernel.parameters() if p.requires_grad]
+    if not params:
+        return
+    with torch.no_grad():
+        x0 = torch.cat([p.flatten() for p in params]).detach().cpu().numpy()
+
+    # --- helper: map flattened vector -> kernel parameters ---
+    def assign_params_from_vector(kernel, x_vec):
+        i = 0
+        for p in params:
+            n = p.numel()
+            new_val = torch.tensor(x_vec[i:i+n], dtype=p.dtype, device=p.device).view_as(p)
+            p.data.copy_(new_val)
+            i += n
+
+    # --- objective & gradient ---
+    def f_numpy(x):
+        assign_params_from_vector(kernel, x)
+        loss = _loo_loss_prop(kernel, X, y, lam)
+        return float(loss.detach().cpu())
+
+    def grad_numpy(x):
+        assign_params_from_vector(kernel, x)
+        for p in params:
+            if p.grad is not None:
+                p.grad.zero_()
+        loss = _loo_loss_prop(kernel, X, y, lam)
+        grads = torch.autograd.grad(loss, params, create_graph=False)
+        g_flat = torch.cat([g.detach().cpu().flatten() for g in grads]).numpy()
+        return g_flat
+
+    # --- constraints (sum=1, nonnegativity) ---
+    n_gamma = 14  # adjust based on number of analytical sigma entries
+    cons = ({
+        "type": "eq",
+        "fun": lambda x: np.sum(x[:n_gamma]) - 1.0,
+        "jac": lambda x: np.concatenate([np.ones(n_gamma), np.zeros_like(x[n_gamma:])])
+    },)
+    bounds = [(0, None)] * n_gamma + [(None, None)] * (len(x0) - n_gamma)
+
+    # --- optimization call ---
+    res = minimize(
+        f_numpy, x0, jac=grad_numpy,
+        method="trust-constr",
+        bounds=bounds,
+        constraints=cons,
+        options={
+            "maxiter": max_iter,
+            "gtol": 1e-6,
+            "xtol": 1e-6,
+            "barrier_tol": 1e-8,
+            "verbose": 3,
+        },
     )
-    return _loo_loss_prop if has_analytical else _loo_loss_pcnk
+
+    # --- update kernel with final parameters ---
+    assign_params_from_vector(kernel, res.x)
+    print(f"[SciPy trust-constr] Success={res.success}  Iter={res.niter}  Final loss={res.fun:.3e}")
+
 
 
 # =========================
@@ -557,11 +647,20 @@ def run_spm(
 
             # --- training stage (LBFGS + LOO + sigma constraints) ---
             if train and isinstance(kernel, nn.Module) and any(p.requires_grad for p in kernel.parameters()):
+    
                 print(f"[{kname}] Training kernel at {freq:.1f} Hz...")
-                train_kernel_lbfgs(
-                    kernel, X, Y[f_idx, :], lam,
-                    max_iter=max_train_iter,
-                )
+                if is_proposed(kernel):  
+                    train_kernel_scipy(kernel, X, Y[f_idx, :], lam, 
+                                       max_iter=max_train_iter)
+                else:
+                    train_kernel_lbfgs(kernel, X, Y[f_idx, :], lam, 
+                                       max_iter=max_train_iter)
+
+
+                # train_kernel_lbfgs(
+                #     kernel, X, Y[f_idx, :], lam,
+                #     max_iter=max_train_iter,
+                # )
 
             # --- evaluation stage (KRR with Julia-style reg) ---
             y_f = Y[f_idx, :]

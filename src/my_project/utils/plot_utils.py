@@ -13,7 +13,7 @@ from typing import Dict, Tuple
 def plot_nmse(freqs: np.ndarray, nmse_db_by_kernel: Dict[str, np.ndarray], out_dir: Path) -> None:
     plt.figure()
     for name, nmse_arr in nmse_db_by_kernel.items():
-        plt.plot(freqs, 10.0 * np.log10(nmse_arr + 1e-12), label=name)
+        plt.plot(freqs[1:], 10.0 * np.log10(nmse_arr[1:] + 1e-12), label=name)
     plt.xlabel("Frequency [Hz]")
     plt.ylabel("NMSE [dB]")
     plt.title("NMSE vs Frequency")

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple, cast, Any
+from typing import Callable, Dict, Optional, Tuple, cast, Any, List
 
 import numpy as np
 import h5py
@@ -35,7 +35,7 @@ import h5py
 import torch
 from torch import nn
 
-from my_project.utils.plot_utils import plot_field_map, plot_nmse
+from my_project.utils.plot_utils import plot_field_map, plot_nmse, plot_trust_constr_history
 
 # -------------------------
 # Constants
@@ -476,16 +476,19 @@ def _choose_loo_loss(kernel: nn.Module) -> Callable[[nn.Module, torch.Tensor, to
 from scipy.optimize import minimize
 
 
-def train_kernel_scipy(kernel, X, y, lam, max_iter=200):
+def train_kernel_scipy(kernel, X, y, lam, max_iter=200)-> Dict[str, List[Any]]:
     """
     Constrained optimization (trust-constr) — Python analogue of Julia's IPNewton.
     Enforces positivity + sum=1 on sigma (analytical part).
     """
 
     # --- Flatten all trainable parameters into a 1D vector ---
-    params = [p for p in kernel.parameters() if p.requires_grad]
-    if not params:
-        return
+    try:
+        params = [p for p in kernel.parameters() if p.requires_grad]
+    except Exception:
+        raise Exception("Kernel has no parameters.")
+    # if not params:
+    #     return
     with torch.no_grad():
         x0 = torch.cat([p.flatten() for p in params]).detach().cpu().numpy()
 
@@ -523,6 +526,16 @@ def train_kernel_scipy(kernel, X, y, lam, max_iter=200):
     },)
     bounds = [(0, None)] * n_gamma + [(None, None)] * (len(x0) - n_gamma)
 
+    # --- plot ---
+    history = {"iter": [], "fun": [], "opt": [], "cviol": [], "trrad": []}
+
+    def callback(x, state):
+        history["iter"].append(state["niter"])
+        history["fun"].append(state["fun"])
+        history["opt"].append(state["optimality"])
+        history["cviol"].append(state["constr_violation"])
+        history["trrad"].append(state["tr_radius"])
+
     # --- optimization call ---
     res = minimize(
         f_numpy, x0, jac=grad_numpy,
@@ -536,12 +549,13 @@ def train_kernel_scipy(kernel, X, y, lam, max_iter=200):
             "barrier_tol": 1e-8,
             "verbose": 3,
         },
+        callback=callback,
     )
 
     # --- update kernel with final parameters ---
     assign_params_from_vector(kernel, res.x)
     print(f"[SciPy trust-constr] Success={res.success}  Iter={res.niter}  Final loss={res.fun:.3e}")
-
+    return history
 
 
 # =========================
@@ -650,11 +664,14 @@ def run_spm(
     
                 print(f"[{kname}] Training kernel at {freq:.1f} Hz...")
                 if is_proposed(kernel):  
-                    train_kernel_scipy(kernel, X, Y[f_idx, :], lam, 
+                    history = train_kernel_scipy(kernel, X, Y[f_idx, :], lam, 
                                        max_iter=max_train_iter)
+                    if freq in [150.0, 300.0, 600.0]:  # whichever subset you want
+                        plot_trust_constr_history(history, freq, out_dir/ "prop_charts")
                 else:
                     train_kernel_lbfgs(kernel, X, Y[f_idx, :], lam, 
                                        max_iter=max_train_iter)
+
 
 
                 # train_kernel_lbfgs(

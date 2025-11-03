@@ -24,6 +24,55 @@ def plot_nmse(freqs: np.ndarray, nmse_db_by_kernel: Dict[str, np.ndarray], out_d
     plt.savefig(out_dir / "NMSE.pdf")
     plt.close()
 
+import matplotlib.pyplot as plt
+from pathlib import Path
+from typing import Mapping, Sequence, Any, Union
+
+def plot_trust_constr_history(
+    history: Mapping[str, Sequence[Any]],
+    freq: float | None = None,
+    out_dir: Union[str, Path] = ".",
+) -> None:
+    """
+    Save trust-constr optimization diagnostics from SciPy minimize.
+
+    Parameters
+    ----------
+    history : dict
+        Collected metrics from the SciPy 'callback' during optimization.
+        Expected keys: "iter", "fun", "opt", "cviol", "trrad".
+    freq : float, optional
+        Frequency label (e.g., 300.0). Used in file names and titles.
+    out_dir : Path or str, optional
+        Directory where PNG charts will be saved. Created if missing.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics = ["fun", "opt", "cviol", "trrad"]
+    freq_label = f"_{int(freq)}Hz" if freq is not None else ""
+
+    for key in metrics:
+        values = history.get(key, [])
+        if not values:
+            continue
+
+        plt.figure()
+        plt.plot(history["iter"], values, marker="o", markersize=3, linewidth=1)
+        plt.xlabel("Iteration")
+        plt.ylabel(key)
+        plt.yscale("log")
+        plt.grid(True, which="both", ls="--", alpha=0.4)
+
+        title = f"{key} vs iteration ({freq:.0f} Hz)"
+        plt.title(title)
+        plt.tight_layout()
+
+        # save file
+        fname = f"trustconstr_{key}{freq_label}.png"
+        plt.savefig(out_dir / fname, dpi=150)
+        plt.close()
+
 
 def _infer_grid_shape(xyz: np.ndarray) -> Tuple[int, int, np.ndarray, np.ndarray]:
     xs = np.unique(np.round(xyz[:, 0], 12))

@@ -472,91 +472,159 @@ def _choose_loo_loss(kernel: nn.Module) -> Callable[[nn.Module, torch.Tensor, to
 # =========================
 # Training IPNewton
 # =========================
-
 from scipy.optimize import minimize
 
+def _rerandomize_sigma_dirichlet(kernel):
+    """Re-randomize analytical sigma like Julia (Dirichlet(1,...,1))."""
+    ana = getattr(kernel, "analytical", None)
+    if ana is None or not hasattr(ana, "sigma"):
+        return
+    N = ana.sigma.numel()
+    draw = np.random.dirichlet(np.ones(N))
+    draw = np.clip(draw, 1e-6, None)   # can work without this and following line
+    draw /= draw.sum() 
 
-def train_kernel_scipy(kernel, X, y, lam, max_iter=200)-> Dict[str, List[Any]]:
-    """
-    Constrained optimization (trust-constr) — Python analogue of Julia's IPNewton.
-    Enforces positivity + sum=1 on sigma (analytical part).
-    """
-
-    # --- Flatten all trainable parameters into a 1D vector ---
-    try:
-        params = [p for p in kernel.parameters() if p.requires_grad]
-    except Exception:
-        raise Exception("Kernel has no parameters.")
-    # if not params:
-    #     return
     with torch.no_grad():
-        x0 = torch.cat([p.flatten() for p in params]).detach().cpu().numpy()
+        ana.sigma.copy_(torch.tensor(draw, dtype=ana.sigma.dtype, device=ana.sigma.device))
+    print(f"[Init] σ randomized (Dirichlet, N={N})")
+def train_kernel_scipy(kernel, X, y, lam, max_iter=200, n_restarts=2):
+    ana = getattr(kernel, "analytical", None)
+    if ana is None or not hasattr(ana, "sigma"):
+        raise ValueError("Analytical sigma not found; trust-constr expects σ.")
 
-    # --- helper: map flattened vector -> kernel parameters ---
-    def assign_params_from_vector(kernel, x_vec):
+    # --- Build ordered param list: [sigma] + [others] ---
+    all_params = [p for p in kernel.parameters() if p.requires_grad]
+    sigma_param = ana.sigma
+    other_params = [p for p in all_params if p is not sigma_param]
+
+    ordered_params = [sigma_param] + other_params
+    sizes = [p.numel() for p in ordered_params]
+    offsets = np.cumsum([0] + sizes)  # e.g., [0, n_gamma, n_gamma+..., ...]
+    print("[Params order]")
+    print("  sigma first:", ordered_params[0] is sigma_param)
+    for i, p in enumerate(ordered_params[:12]):  # print first dozen
+        is_w = any(p is wp for wp in kernel.neural.W.parameters())
+        tag = " (W)" if is_w else ""
+        print(f"  idx {i:02d}: numel={p.numel()}{tag}")
+
+    def flatten_params():
+        with torch.no_grad():
+            return torch.cat([p.flatten() for p in ordered_params]).detach().cpu().numpy()
+
+    def assign_params_from_vector(x_vec):
         i = 0
-        for p in params:
+        for p in ordered_params:
             n = p.numel()
             new_val = torch.tensor(x_vec[i:i+n], dtype=p.dtype, device=p.device).view_as(p)
             p.data.copy_(new_val)
             i += n
 
-    # --- objective & gradient ---
+    # --- constraints only on the sigma block [0:n_gamma) ---
+    n_gamma = sigma_param.numel()
+    def sum_to_one(x): return np.sum(x[0:n_gamma]) - 1.0
+    def sum_to_one_jac(x):
+        g = np.zeros_like(x)
+        g[0:n_gamma] = 1.0
+        return g
+
+    cons = ({"type":"eq","fun":sum_to_one,"jac":sum_to_one_jac},)
+    bounds = [(0,None)]*n_gamma + [(None,None)]*(sum(sizes)-n_gamma)
+
+    # --- Dirichlet re-randomize σ each restart, keep tiny interior offset ---
+    def rerand_sigma_dirichlet():
+        N = n_gamma
+        draw = np.random.dirichlet(np.ones(N))
+        draw = np.clip(draw, 1e-6, None); draw /= draw.sum()  # stay strictly interior
+        with torch.no_grad():
+            sigma_param.data.copy_(torch.tensor(draw, dtype=sigma_param.dtype, device=sigma_param.device))
+
+    # --- objective & grad ---
     def f_numpy(x):
-        assign_params_from_vector(kernel, x)
-        loss = _loo_loss_prop(kernel, X, y, lam)
+        assign_params_from_vector(x)
+        loss = _loo_loss_prop(kernel, X, y, lam)  # keep your loss as-is        
         return float(loss.detach().cpu())
 
     def grad_numpy(x):
-        assign_params_from_vector(kernel, x)
-        for p in params:
+        assign_params_from_vector(x)
+        for p in ordered_params:
             if p.grad is not None:
                 p.grad.zero_()
         loss = _loo_loss_prop(kernel, X, y, lam)
-        grads = torch.autograd.grad(loss, params, create_graph=False)
-        g_flat = torch.cat([g.detach().cpu().flatten() for g in grads]).numpy()
-        return g_flat
+        grads = torch.autograd.grad(loss, ordered_params, create_graph=False)
+            # --- Sanity check: verify neural W gradients ---
+        # --- REAL sanity check for neural grads (use grads returned by autograd.grad) ---
+        if hasattr(kernel, "neural") and hasattr(kernel.neural, "W"):
+            print("\n[Grad sanity] Neural W grads (from autograd.grad):")
+            # Build a map param -> grad for easy lookup
+            gmap = {id(p): g for p, g in zip(ordered_params, grads)}
+            for name, p in kernel.neural.W.named_parameters():
+                g = gmap.get(id(p), None)
+                if g is None:
+                    print(f"  {name:<20s}: None (param not in optimization vector)")
+                else:
+                    gnorm = float(torch.linalg.norm(g).detach().cpu())
+                    print(f"  {name:<20s}: ||grad|| = {gnorm:.3e}")
+        #------------------------------------------------------------
+        return np.concatenate([g.detach().cpu().flatten() for g in grads])
 
-    # --- constraints (sum=1, nonnegativity) ---
-    n_gamma = 14  # adjust based on number of analytical sigma entries
-    cons = ({
-        "type": "eq",
-        "fun": lambda x: np.sum(x[:n_gamma]) - 1.0,
-        "jac": lambda x: np.concatenate([np.ones(n_gamma), np.zeros_like(x[n_gamma:])])
-    },)
-    bounds = [(0, None)] * n_gamma + [(None, None)] * (len(x0) - n_gamma)
+    best_fun = np.inf
+    best_x = None
+    best_hist = None
 
-    # --- plot ---
-    history = {"iter": [], "fun": [], "opt": [], "cviol": [], "trrad": []}
+    for r in range(n_restarts):
+        print(f"\n[trust-constr] Restart {r+1}/{n_restarts}")
+        rerand_sigma_dirichlet()
 
-    def callback(x, state):
-        history["iter"].append(state["niter"])
-        history["fun"].append(state["fun"])
-        history["opt"].append(state["optimality"])
-        history["cviol"].append(state["constr_violation"])
-        history["trrad"].append(state["tr_radius"])
+        x0 = flatten_params()
+        x0 = x0 + 1e-2*np.random.randn(*x0.shape)  # small global jitter
 
-    # --- optimization call ---
-    res = minimize(
-        f_numpy, x0, jac=grad_numpy,
-        method="trust-constr",
-        bounds=bounds,
-        constraints=cons,
-        options={
-            "maxiter": max_iter,
-            "gtol": 1e-6,
-            "xtol": 1e-6,
-            "barrier_tol": 1e-8,
-            "verbose": 3,
-        },
-        callback=callback,
-    )
+        history = {"iter": [], "fun": [], "opt": [], "cviol": [], "trrad": []}
+        def callback(x, state):
+            history["iter"].append(state["niter"])
+            history["fun"].append(state["fun"])
+            history["opt"].append(state["optimality"])
+            history["cviol"].append(state["constr_violation"])
+            history["trrad"].append(state["tr_radius"])
 
-    # --- update kernel with final parameters ---
-    assign_params_from_vector(kernel, res.x)
-    print(f"[SciPy trust-constr] Success={res.success}  Iter={res.niter}  Final loss={res.fun:.3e}")
-    return history
+            # --- 🔍 probe once before minimize ---
+        if not hasattr(train_kernel_scipy, "_probed"):
+            with torch.enable_grad():
+                W = getattr(kernel, "neural", None)
+                if W is not None and hasattr(W, "W"):
+                    net = W.W
+                    params_W = list(net.parameters())
+                    if params_W:
+                        net_dtype = next(net.parameters()).dtype
+                        kv = (W.k.to(dtype=net_dtype, device=W.v.device)
+                            * W.v.to(dtype=net_dtype, device=W.v.device))
+                        out = net(kv.T).squeeze(-1)
+                        proxy = out.sum()
+                        gW = torch.autograd.grad(proxy, params_W,
+                                                create_graph=False, allow_unused=True)
+                        norms = [0.0 if g is None else float(torch.linalg.norm(g).detach().cpu())
+                                for g in gW]
+                        print("[Probe] Wout.sum grad norms:", norms)
+            train_kernel_scipy._probed = True
 
+        res = minimize(
+            f_numpy, x0, jac=grad_numpy,
+            method="trust-constr",
+            bounds=bounds, constraints=cons,
+            options=dict(maxiter=max_iter, gtol=1e-6, xtol=1e-6, barrier_tol=1e-6, verbose=3),
+            callback=callback,
+        )
+        print(f"[trust-constr] Run {r+1}: success={res.success}, loss={res.fun:.3e}, iters={res.niter}")
+
+        if res.fun < best_fun:
+            best_fun, best_x, best_hist = res.fun, res.x.copy(), history
+
+    if best_x is not None:
+        assign_params_from_vector(best_x)
+        print(f"[trust-constr] Best loss={best_fun:.3e} after {n_restarts} restarts")
+    else:
+        print("[trust-constr] No successful run.")
+
+    return best_hist or {}
 
 # =========================
 # Training (LBFGS + LOO + sigma constraints)
@@ -666,7 +734,7 @@ def run_spm(
                 if is_proposed(kernel):  
                     history = train_kernel_scipy(kernel, X, Y[f_idx, :], lam, 
                                        max_iter=max_train_iter)
-                    if freq in [150.0, 300.0, 600.0]:  # whichever subset you want
+                    if freq in [150.0, 300.0, 600.0, 900.0, 1200.0, 1500.0]:  # whichever subset you want
                         plot_trust_constr_history(history, freq, out_dir/ "prop_charts")
                 else:
                     train_kernel_lbfgs(kernel, X, Y[f_idx, :], lam, 
@@ -690,25 +758,22 @@ def run_spm(
             if (reg_a.abs().item() == 0.0) and (reg_n.abs().item() == 0.0):
                 A = K + lam * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
             else:
-                reg = reg_a + reg_n if hasattr(kernel, "AnalyticalKernel") or hasattr(kernel, "analytical") else reg_n
+                reg = reg_a + reg_n if hasattr(kernel, "analytical") else reg_n
                 A = K + (lam * reg) * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
 
             alpha = _torch_solve(A, y_f)
             # ------------------ CONTROLLO STABILITÀ ------------------
-            # Controlla la matrice K
-            print(f"[{freq} Hz] K mean: {K.abs().mean().item():.2e}")
-            
             # Add this debug code to your SPM run before the condition number calculation
             if torch.isnan(K).any() or torch.isinf(K).any():
                 print(f"!!! KERNEL PROBLEM at {freq} Hz:")
                 print(f"  K contains NaN: {torch.isnan(K).any()}")
                 print(f"  K contains Inf: {torch.isinf(K).any()}")
                 print(f"  k value: {k}")
-            
+            # Controlla la matrice K
             # Controlla il condizionamento (CN) di A. Un CN > 1e12 è problematico.
             CN = np.linalg.cond(A.detach().cpu().numpy())
-            print(f"[{freq} Hz] A Condition Number: {CN:.2e}")
-
+            print(f"[{freq} Hz] K mean: {K.abs().mean().item():.2e}", end='  ')    
+            print(f"  A Condition Number: {CN:.2e}")
             # Se CN è troppo grande, c'è l'instabilità.
             if CN > 1e10:
                 print("!!! WARNING: KRR Matrix A is ill-conditioned, likely leading to NaN/Inf")

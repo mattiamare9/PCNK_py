@@ -47,19 +47,33 @@ def _combine_outputs(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     if a.device != b.device:
         b = b.to(a.device)
 
-    # Final shape check (we should be adding same-shaped tensors)
+    # Final shape check
     if a.shape != b.shape:
         raise RuntimeError(
             f"Composite parts shape mismatch: analytical {tuple(a.shape)} vs neural {tuple(b.shape)}"
         )
 
-    out = a + b
+    # --- Dynamic magnitude balancing ---
+    a_mean = a.abs().mean().clamp_min(1e-12)
+    b_mean = b.abs().mean().clamp_min(1e-12)
+    scale = a_mean / b_mean
+    b = b * scale
 
+    print(
+        f"[Combine] ‖a‖={a_mean:.3f}, ‖b‖(orig)={b_mean:.3f}, scale={scale:.3f}, "
+        f"‖b_scaled‖={(b.abs().mean()):.3f}, ratio={(b.abs().mean()/a_mean):.2f}"
+    )
+
+    # Combine normalized components
+    out = a + b
+    
+    out = out / out.abs().mean().clamp_min(1e-8) # !!!!!!!!!!!!!!
+    
     # Normalize stray (1,) to scalar
     if out.ndim == 1 and out.numel() == 1:
         out = out.squeeze(0)
-    return out
 
+    return out
 
 # --------------------------------------------------------------------------
 # Base

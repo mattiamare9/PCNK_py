@@ -122,10 +122,10 @@ def eval_neural_kernel_pair(a, x1: torch.Tensor, x2: torch.Tensor) -> torch.Tens
     sigma_eff = a.sigma * Wout  Multiplies the baseline sigma by the 
     neural output W_out to get the effective weights sigma_eff
     """
-    # net_dtype = next(a.W.parameters()).dtype
+    net_dtype = next(a.W.parameters()).dtype
     # kv = (a.k.to(dtype=net_dtype, device=a.v.device) * a.v.to(dtype=net_dtype))
     #---
-    net_dtype = torch.float64 if a.v.dtype == torch.float64 else torch.float32
+    # net_dtype = torch.float64 if a.v.dtype == torch.float64 else torch.float32
     # assicura che k e v siano REALI, sullo stesso device/dtype
     k_real = torch.as_tensor(a.k, device=a.v.device).real.to(net_dtype)
     v_real = a.v.to(dtype=net_dtype, device=a.v.device)

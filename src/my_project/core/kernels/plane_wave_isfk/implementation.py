@@ -263,6 +263,10 @@ class NeuralWeightPlaneWaveKernel(PlaneWaveKernelBase):
         v_t = torch.as_tensor(v, dtype=self.dtype, device=self.device).real
         assert v_t.ndim == 2 and v_t.shape[0] == 3, "v must be (3, N)"
         v_t = _normalize_columns(v_t)
+        # -------  PROVA DI STANDADIZATION -------
+        v_t = v_t - v_t.mean(dim=1, keepdim=True)
+        v_t = v_t / v_t.abs().max()
+        # -------  PROVA DI STANDADIZATION -------        
         self.register_buffer("v", v_t, persistent=True)
 
         N = self.v.shape[1]

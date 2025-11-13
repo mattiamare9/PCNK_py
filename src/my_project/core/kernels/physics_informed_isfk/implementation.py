@@ -56,7 +56,8 @@ def _combine_outputs(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     # --- Dynamic magnitude balancing ---
     a_mean = a.abs().mean().clamp_min(1e-12)
     b_mean = b.abs().mean().clamp_min(1e-12)
-    scale = a_mean / b_mean
+    # scale = a_mean / b_mean
+    scale = (torch.linalg.norm(a) / torch.linalg.norm(b)).clamp(min=0.1)
     b = b * scale
 
     print(
@@ -67,7 +68,7 @@ def _combine_outputs(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     # Combine normalized components
     out = a + b
     
-    out = out / out.abs().mean().clamp_min(1e-8) # !!!!!!!!!!!!!!
+    # out = out / out.abs().mean().clamp_min(1e-8) # !!!!!!!!!!!!!!
     
     # Normalize stray (1,) to scalar
     if out.ndim == 1 and out.numel() == 1:

@@ -5,7 +5,6 @@ import torch.nn as nn
 from my_project.core.spm import load_spm_h5, run_spm
 from my_project.core.kernels import (
     uniform_kernel,
-    plane_wave_pin_kernel,
     plane_wave_kernel,
     directed_residual_pin_kernel,
 )
@@ -40,7 +39,7 @@ def make_default_W(device: str = "cpu", dtype=torch.float64) -> nn.Module:
 
 def main():
         # Nota: può rallentare il training, usalo solo per il debug.
-    torch.autograd.set_detect_anomaly(True) 
+    # torch.autograd.set_detect_anomaly(True) 
     # === Parametri esperimento (coerenti con Julia) ===
     h5_path = DATA_DIR / "400SPM_converted.h5"
     SNR_DB = 20.0
@@ -60,11 +59,6 @@ def main():
         # baseline: nessun training (σ fisso implicito nel kernel)
         return uniform_kernel(k, dtype=torch.complex128, device=DEVICE)
 
-    # def pcnk_factory(k: float):
-    #     # PlaneWave PIN (Uniform + Neural residual), ma qui usiamo
-    #     # il costruttore specifico "plane_wave_pin_kernel" (analytical=Uniform ISF + neural plane-wave)
-    #     # return plane_wave_pin_kernel(k, ord=ORD_NN, W=W, dtype=torch.complex128, device=DEVICE)
-    
     def pcnk_factory(k: float):
         """
         Plane-Wave PCNK kernel (NeuralWeightPlaneWaveKernel analogue):
@@ -94,7 +88,7 @@ def main():
     # === Directory output (timestamped) ===
     out_dir = create_run_directory(OUTPUT_DIR)
 
-    # === Esecuzione SPM (LOO + vincoli su sigma) ===
+    # === Esecuzione SPM ===
     results = run_spm(
         data,
         snr_db=SNR_DB,

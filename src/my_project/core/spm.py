@@ -35,7 +35,7 @@ import h5py
 import torch
 from torch import nn
 
-from my_project.utils.plot_utils import plot_field_map, plot_nmse, plot_trust_constr_history
+from my_project.utils.plot_utils import plot_field_map, plot_nmse, plot_trust_constr_history, plot_lbfgs_history
 
 # -------------------------
 # Constants
@@ -85,6 +85,72 @@ def load_spm_h5(path: str | Path) -> SPMData:
 # =========================
 # Helpers
 # =========================
+def debug_freq(
+    freq: float,
+    kernel: nn.Module,
+    K: torch.Tensor,
+    A: torch.Tensor,
+    alpha: torch.Tensor,
+    loo_loss_fn,
+    X: torch.Tensor,
+    y: torch.Tensor,
+    lam: float,
+) -> None:
+    # 1) K & A conditioning and spectra
+    with torch.no_grad():
+        Kc = K.detach().cpu().numpy()
+        Ac = A.detach().cpu().numpy()
+        CN_K = np.linalg.cond(Kc)
+        CN_A = np.linalg.cond(Ac)
+        # smallest singular values (rough proxy for near-singularity)
+        sK = np.linalg.svd(Kc, compute_uv=False)
+        sA = np.linalg.svd(Ac, compute_uv=False)
+        print(f"[{freq:.0f} Hz] cond(K)={CN_K:.2e}, cond(A)={CN_A:.2e}, minσ(K)={sK.min():.2e}, minσ(A)={sA.min():.2e}")
+
+    # 2) Diagonal of inv(A) used by LOO denominator
+    with torch.no_grad():
+        Kinv, d = _safe_Kinv_and_diag(A)
+        d_abs_min = d.abs().real.min().item()
+        d_abs_med = d.abs().real.median().item()
+        print(f"[{freq:.0f} Hz] LOO diag(inv(A)) min|d|={d_abs_min:.3e}, median|d|={d_abs_med:.3e}")
+
+    # 3) reg terms (are they exploding / vanishing?)
+    with torch.no_grad():
+        reg_a, reg_n = _reg_terms(kernel)
+        ra, rn = reg_a.item(), reg_n.item()
+        print(f"[{freq:.0f} Hz] reg_a={ra:.3e}, reg_n={rn:.3e}, lam*reg on diag={lam*(ra+rn if hasattr(kernel,'analytical') else rn):.3e}")
+
+    # 4) sigma stats (analytical & neural)
+    def _summinmax(t):
+        t = torch.real(t).detach().cpu()
+        return float(t.sum()), float(t.min()), float(t.max())
+    ana = _get_attr(kernel, "AnalyticalKernel", "analytical", "analytical_kernel")
+    neu = _get_attr(kernel, "NeuralKernel", "neural", "neural_kernel") or (kernel if hasattr(kernel,"W") else None)
+
+    if ana is not None and hasattr(ana, "sigma"):
+        S, m, M = _summinmax(ana.sigma)
+        print(f"[{freq:.0f} Hz] sigma_analytical: sum={S:.3e}, min={m:.3e}, max={M:.3e}")
+    if neu is not None and hasattr(neu, "sigma"):
+        S, m, M = _summinmax(neu.sigma)
+        print(f"[{freq:.0f} Hz] sigma_neural:      sum={S:.3e}, min={m:.3e}, max={M:.3e}")
+
+    # 5) W outputs dispersion (W(v) and W(k*v))
+    if neu is not None and hasattr(neu, "W") and hasattr(neu, "v") and hasattr(neu, "k"):
+        net = neu.W
+        v = neu.v
+        v_in = v.T if (v.ndim == 2 and v.shape[0] == 3) else v
+        with torch.no_grad():
+            w_v  = net(v_in).squeeze().detach().cpu().numpy()
+            w_kv = net((neu.k.to(v_in.dtype) * v_in)).squeeze().detach().cpu().numpy()
+        def _stats(a):
+            a = np.asarray(a).real
+            return np.mean(a), np.std(a), np.min(a), np.max(a)
+        mv, sv, mvn, Mv = _stats(w_v)
+        mkv, skv, mnkv, Mkv = _stats(w_kv)
+        print(f"[{freq:.0f} Hz] W(v):  mean={mv:.3e}, std={sv:.3e}, min={mvn:.3e}, max={Mv:.3e}")
+        print(f"[{freq:.0f} Hz] W(kv): mean={mkv:.3e}, std={skv:.3e}, min={mnkv:.3e}, max={Mkv:.3e}")
+
+
 def is_proposed(kernel: nn.Module) -> bool:
     """
     Detects whether the kernel includes an analytical part
@@ -107,18 +173,6 @@ def add_awgn(sig: np.ndarray, snr_db: float) -> np.ndarray:
         np.random.randn(*sig.shape) + 1j * np.random.randn(*sig.shape)
     )
     return sig + noise
-
-# prvious wrong implementation (global average instead of per frequency avg)
-# def add_awgn(sig: np.ndarray, snr_db: Optional[float]) -> np.ndarray:
-#     if snr_db is None:
-#         return sig
-#     snr = 10.0 ** (snr_db / 10.0)
-#     power = np.mean(np.abs(sig) ** 2)
-#     noise_power = power / max(snr, 1e-12)
-#     noise = np.sqrt(noise_power / 2.0) * (
-#         np.random.randn(*sig.shape) + 1j * np.random.randn(*sig.shape)
-#     )
-#     return sig + noise
 
 
 def nmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -399,12 +453,16 @@ def _safe_Kinv_and_diag(A: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     diag = torch.diagonal(Kinv)
 
     # Clamp denom magnitude to avoid div-by-(~0 + i~0)
-    eps = diag.abs().real.mean() * 1e-8 if torch.isfinite(diag).all() else torch.tensor(1e-8, device=A.device)
-    eps = eps.clamp(min=1e-12)
+    # eps = diag.abs().real.mean() * 1e-8 if torch.isfinite(diag).all() else torch.tensor(1e-8, device=A.device)
+    # eps = eps.clamp(min=1e-12)
+    # small = diag.abs() < eps
+    # if small.any():
+    #     # add eps in the current complex direction (preserva fase, evita cuspidi)
+    #     diag = torch.where(small, diag + eps * (diag / (diag.abs() + 1e-24)), diag)
+    eps = torch.quantile(diag.abs().real, 0.05) * 1e-5  # 5th-percentile based
+    eps = eps.clamp(min=torch.tensor(1e-10, device=A.device))
     small = diag.abs() < eps
-    if small.any():
-        # add eps in the current complex direction (preserva fase, evita cuspidi)
-        diag = torch.where(small, diag + eps * (diag / (diag.abs() + 1e-24)), diag)
+    diag = torch.where(small, diag + eps * (diag / (diag.abs() + 1e-24)), diag)
 
     return Kinv, diag
 
@@ -487,19 +545,29 @@ def _rerandomize_sigma_dirichlet(kernel):
     with torch.no_grad():
         ana.sigma.copy_(torch.tensor(draw, dtype=ana.sigma.dtype, device=ana.sigma.device))
     print(f"[Init] σ randomized (Dirichlet, N={N})")
-def train_kernel_scipy(kernel, X, y, lam, max_iter=200, n_restarts=2):
+
+def train_kernel_scipy(kernel, X, y, lam, max_iter=200, n_restarts=3):
     ana = getattr(kernel, "analytical", None)
     if ana is None or not hasattr(ana, "sigma"):
         raise ValueError("Analytical sigma not found; trust-constr expects σ.")
 
-    # --- Build ordered param list: [sigma] + [others] ---
+    # --- Build ordered param list: [sigma, beta, ... , W] ---
     all_params = [p for p in kernel.parameters() if p.requires_grad]
     sigma_param = ana.sigma
-    other_params = [p for p in all_params if p is not sigma_param]
+    beta_param = getattr(ana, "beta", None)
 
-    ordered_params = [sigma_param] + other_params
+    other_params = [
+        p for p in all_params
+        if p.requires_grad and (p is not sigma_param) and (p is not beta_param)
+    ]
+    ordered_params = [sigma_param]
+    if beta_param is not None:
+        ordered_params.append(beta_param)
+    ordered_params += other_params
+
     sizes = [p.numel() for p in ordered_params]
-    offsets = np.cumsum([0] + sizes)  # e.g., [0, n_gamma, n_gamma+..., ...]
+    offsets = np.cumsum([0] + sizes)
+
     print("[Params order]")
     print("  sigma first:", ordered_params[0] is sigma_param)
     for i, p in enumerate(ordered_params[:12]):  # print first dozen
@@ -507,6 +575,18 @@ def train_kernel_scipy(kernel, X, y, lam, max_iter=200, n_restarts=2):
         tag = " (W)" if is_w else ""
         print(f"  idx {i:02d}: numel={p.numel()}{tag}")
 
+    print("Total params:", sum(p.numel() for p in ordered_params))
+    print("Neural net params:", sum(p.numel() for p in kernel.neural.W.parameters()))
+
+    # Compare overlap
+    overlap = sum(
+        1 for pw in kernel.neural.W.parameters()
+        if any(pw is p for p in ordered_params)
+    )
+    print(f"Overlap count (W inside ordered_params): {overlap}")
+
+
+    # --- flatten/assign utils ---
     def flatten_params():
         with torch.no_grad():
             return torch.cat([p.flatten() for p in ordered_params]).detach().cpu().numpy()
@@ -519,16 +599,24 @@ def train_kernel_scipy(kernel, X, y, lam, max_iter=200, n_restarts=2):
             p.data.copy_(new_val)
             i += n
 
-    # --- constraints only on the sigma block [0:n_gamma) ---
+    # --- constraints ---
     n_gamma = sigma_param.numel()
-    def sum_to_one(x): return np.sum(x[0:n_gamma]) - 1.0
+    n_beta = beta_param.numel() if beta_param is not None else 0
+
+    def sum_to_one(x): return np.sum(x[:n_gamma]) - 1.0
     def sum_to_one_jac(x):
         g = np.zeros_like(x)
-        g[0:n_gamma] = 1.0
+        g[:n_gamma] = 1.0
         return g
 
-    cons = ({"type":"eq","fun":sum_to_one,"jac":sum_to_one_jac},)
-    bounds = [(0,None)]*n_gamma + [(None,None)]*(sum(sizes)-n_gamma)
+    cons = ({"type": "eq", "fun": sum_to_one, "jac": sum_to_one_jac},)
+
+    # bounds: γ ≥ 0 ; β ∈ [0,100] ; rest unbounded
+    bounds = (
+        [(0.0, None)] * n_gamma +
+        ([(0.0, 100.0)] * n_beta if n_beta > 0 else []) +
+        [(None, None)] * (sum(sizes) - n_gamma - n_beta)
+    )
 
     # --- Dirichlet re-randomize σ each restart, keep tiny interior offset ---
     def rerand_sigma_dirichlet():
@@ -538,10 +626,10 @@ def train_kernel_scipy(kernel, X, y, lam, max_iter=200, n_restarts=2):
         with torch.no_grad():
             sigma_param.data.copy_(torch.tensor(draw, dtype=sigma_param.dtype, device=sigma_param.device))
 
-    # --- objective & grad ---
+    # --- objective & gradient ---
     def f_numpy(x):
         assign_params_from_vector(x)
-        loss = _loo_loss_prop(kernel, X, y, lam)  # keep your loss as-is        
+        loss = _loo_loss_prop(kernel, X, y, lam)
         return float(loss.detach().cpu())
 
     def grad_numpy(x):
@@ -551,28 +639,29 @@ def train_kernel_scipy(kernel, X, y, lam, max_iter=200, n_restarts=2):
                 p.grad.zero_()
         loss = _loo_loss_prop(kernel, X, y, lam)
         grads = torch.autograd.grad(loss, ordered_params, create_graph=False)
-            # --- Sanity check: verify neural W gradients ---
-        # --- REAL sanity check for neural grads (use grads returned by autograd.grad) ---
-        if hasattr(kernel, "neural") and hasattr(kernel.neural, "W"):
-            print("\n[Grad sanity] Neural W grads (from autograd.grad):")
-            # Build a map param -> grad for easy lookup
-            gmap = {id(p): g for p, g in zip(ordered_params, grads)}
-            for name, p in kernel.neural.W.named_parameters():
-                g = gmap.get(id(p), None)
-                if g is None:
-                    print(f"  {name:<20s}: None (param not in optimization vector)")
-                else:
-                    gnorm = float(torch.linalg.norm(g).detach().cpu())
-                    print(f"  {name:<20s}: ||grad|| = {gnorm:.3e}")
+
+        # --- Sanity check: verify neural W gradients ---
+        # if hasattr(kernel, "neural") and hasattr(kernel.neural, "W"):
+        #     print("\n[Grad sanity] Neural W grads (from autograd.grad):")
+        #     # Build a map param -> grad for easy lookup
+        #     gmap = {id(p): g for p, g in zip(ordered_params, grads)}
+        #     for name, p in kernel.neural.W.named_parameters():
+        #         g = gmap.get(id(p), None)
+        #         if g is None:
+        #             print(f"  {name:<20s}: None (param not in optimization vector)")
+        #         else:
+        #             gnorm = float(torch.linalg.norm(g).detach().cpu())
+        #             print(f"  {name:<20s}: ||grad|| = {gnorm:.3e}")
         #------------------------------------------------------------
         return np.concatenate([g.detach().cpu().flatten() for g in grads])
 
-    best_fun = np.inf
-    best_x = None
-    best_hist = None
-
+    # --- multi-restart optimization loop ---
+    best_fun, best_x, best_hist = np.inf, None, None
     for r in range(n_restarts):
         print(f"\n[trust-constr] Restart {r+1}/{n_restarts}")
+        with torch.no_grad():
+            print("[ΔW]", sum(float(p.abs().sum()) for p in kernel.neural.W.parameters()))
+
         rerand_sigma_dirichlet()
 
         x0 = flatten_params()
@@ -614,7 +703,6 @@ def train_kernel_scipy(kernel, X, y, lam, max_iter=200, n_restarts=2):
             callback=callback,
         )
         print(f"[trust-constr] Run {r+1}: success={res.success}, loss={res.fun:.3e}, iters={res.niter}")
-
         if res.fun < best_fun:
             best_fun, best_x, best_hist = res.fun, res.x.copy(), history
 
@@ -623,7 +711,6 @@ def train_kernel_scipy(kernel, X, y, lam, max_iter=200, n_restarts=2):
         print(f"[trust-constr] Best loss={best_fun:.3e} after {n_restarts} restarts")
     else:
         print("[trust-constr] No successful run.")
-
     return best_hist or {}
 
 # =========================
@@ -637,23 +724,28 @@ def train_kernel_lbfgs(
     lam: float,
     *,
     max_iter: int = 200,
-) -> None:
+) -> Dict[str, List[float]]:
     """
     Train kernel parameters using LBFGS with a LOO loss (Julia-style),
     and enforce sigma constraints (hard projection or soft penalties).
     """
     params = [p for p in kernel.parameters() if p.requires_grad]
     if not params:
-        return
-
+        return {"iter": [], "loss": []}
     loo = _choose_loo_loss(kernel)
-    optimizer = torch.optim.LBFGS(params, lr=0.3, max_iter=max_iter, line_search_fn='strong_wolfe')
+    optimizer = torch.optim.LBFGS(
+        params, lr=.03, max_iter=max_iter, line_search_fn='strong_wolfe',
+        tolerance_grad=1e-14, tolerance_change=1e-14,
+    )
+
+    history = {"iter": [], "loss": []}
+    iter_count = [0]  # mutable counter for closure scope
 
     def closure():
         optimizer.zero_grad()
 
         # NEW: applica vincoli hard prima del forward per evitare NaN in K
-        _apply_sigma_constraints_hard(kernel)
+       # _apply_sigma_constraints_hard(kernel)
         loss = loo(kernel, X, y, lam)
 
         # if not hard_sigma:
@@ -664,12 +756,23 @@ def train_kernel_lbfgs(
             return (torch.ones((), dtype=loss.dtype, device=loss.device) * 1e6)
 
         loss.backward()
+        # Log only once per optimizer iteration
+        history["iter"].append(iter_count[0])
+        history["loss"].append(loss.item())
+        iter_count[0] += 1
+        # print(f"Closure called, loss={loss.item():.3e}")
+
         return loss
 
     optimizer.step(closure)
 
+    # ---- sanity grad check
+    for g in [p.grad for p in params if p.grad is not None]:
+        print(f"grad norm: {g.norm().item():.3e}")
+    # ---- sanity grad check    
     # Apply hard constraints after step (analytical simplex, neural >=0)
     _apply_sigma_constraints_hard(kernel)
+    return history
 
 
 # =========================
@@ -737,8 +840,10 @@ def run_spm(
                     if freq in [150.0, 300.0, 600.0, 900.0, 1200.0, 1500.0]:  # whichever subset you want
                         plot_trust_constr_history(history, freq, out_dir/ "prop_charts")
                 else:
-                    train_kernel_lbfgs(kernel, X, Y[f_idx, :], lam, 
+                    history = train_kernel_lbfgs(kernel, X, Y[f_idx, :], lam, 
                                        max_iter=max_train_iter)
+                    if freq in [150.0, 300.0, 600.0, 900.0, 1200.0, 1500.0]:
+                        plot_lbfgs_history(history, freq, out_dir / "pcnk_charts")
 
 
 
@@ -762,6 +867,8 @@ def run_spm(
                 A = K + (lam * reg) * torch.eye(K.shape[0], dtype=K.dtype, device=K.device)
 
             alpha = _torch_solve(A, y_f)
+            debug_freq(freq, kernel, K, A, alpha, _choose_loo_loss(kernel), X, y_f, lam)
+
             # ------------------ CONTROLLO STABILITÀ ------------------
             # Add this debug code to your SPM run before the condition number calculation
             if torch.isnan(K).any() or torch.isinf(K).any():
@@ -786,7 +893,7 @@ def run_spm(
             yp = yv_hat.detach().cpu().numpy()
             num = np.linalg.norm(yt - yp)**2
             den = np.linalg.norm(yt)**2 + 1e-12
-            print(f"[{freq:.0f} Hz] ||y_true||^2={den:.3e}  ||err||^2={num:.3e}  NMSE={num/den:.3e}")
+            print(f"[{freq} Hz] ||y_true||^2={den:.3e}  ||err||^2={num:.3e}  NMSE={num/den:.3e}")
             # ------- FINE DEBUG PRINT-------
 
             nmse_list.append(nmse(yv_f.detach().cpu().numpy(), yv_hat.detach().cpu().numpy()))

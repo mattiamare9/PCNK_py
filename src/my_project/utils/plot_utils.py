@@ -73,6 +73,27 @@ def plot_trust_constr_history(
         plt.savefig(out_dir / fname, dpi=150)
         plt.close()
 
+def plot_lbfgs_history(
+    history: Dict[str, list], 
+    freq: float, 
+    out_dir: Union[str, Path] = ".",
+) -> None:
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    iters = history.get("iter", [])
+    loss = history.get("loss", [])
+    plt.figure()
+    plt.plot(iters, loss, label="LBFGS loss")
+    plt.xlabel("Iteration")
+    plt.ylabel("Loss")
+    plt.title(f"LBFGS convergence ({freq:.0f} Hz)")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_dir / f"lbfgs_loss_{int(freq)}Hz.png")
+    plt.close()
+
 
 def _infer_grid_shape(xyz: np.ndarray) -> Tuple[int, int, np.ndarray, np.ndarray]:
     xs = np.unique(np.round(xyz[:, 0], 12))
